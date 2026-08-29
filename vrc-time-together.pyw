@@ -5,9 +5,14 @@ import os
 import sqlite3
 import sys
 import tkinter as tk
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from tkinter import messagebox, ttk
+
+try:
+    from tzlocal import get_localzone
+except ImportError:
+    get_localzone = None
 
 
 APP_TITLE = "VRCX · Friendship Analytics"
@@ -24,6 +29,17 @@ BORDER = "#30363d"
 SUCCESS = "#56d364"
 WARNING = "#f2cc60"
 GRID = "#28313b"
+LOCAL_TIMEZONE = (
+    get_localzone() if get_localzone is not None else datetime.now().astimezone().tzinfo
+)
+_local_now = datetime.now(LOCAL_TIMEZONE)
+_local_offset = _local_now.strftime("%z")
+_local_offset = _local_offset[:3] + ":" + _local_offset[3:]
+LOCAL_TIMEZONE_NAME = f"{_local_now.tzname()} · UTC{_local_offset}"
+SERIES_COLORS = (
+    "#9185ff", "#58a6ff", "#56d364", "#f2cc60", "#ff7b72",
+    "#d2a8ff", "#79c0ff", "#7ee787", "#ffa657", "#ff9bce",
+)
 
 
 def quote_identifier(value: str) -> str:
@@ -35,6 +51,20 @@ def open_database(database_path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(uri, uri=True, timeout=5)
     connection.row_factory = sqlite3.Row
     return connection
+
+
+def local_range_utc(start_date: date, end_date: date) -> tuple[datetime, datetime]:
+    start = datetime.combine(start_date, time.min, tzinfo=LOCAL_TIMEZONE)
+    end = datetime.combine(
+        end_date + timedelta(days=1), time.min, tzinfo=LOCAL_TIMEZONE
+    )
+    return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+
+
+def sqlite_timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
 
 
 def find_friend_table(connection: sqlite3.Connection) -> str:
@@ -61,14 +91,130 @@ def find_friend_table(connection: sqlite3.Connection) -> str:
     )
 
 
-def load_rankings(
+def load_local_daily_series(
+    database_path: Path,
+    start_date: date,
+    end_date: date,
+    user_ids: list[str] | None = None,
+) -> tuple[dict[str, list[tuple[date, int]]], list[tuple[date, int]]]:
+    """Split friend encounters at local midnight and merge social overlaps."""
+    if end_date < start_date:
+        raise ValueError("The end date must be on or after the start date.")
+    days = [
+        start_date + timedelta(days=index)
+        for index in range((end_date - start_date).days + 1)
+    ]
+    range_start, range_end = local_range_utc(start_date, end_date)
+    requested_ids = list(dict.fromkeys(user_ids or []))
+    totals: dict[str, dict[date, int]] = {
+        user_id: {day: 0 for day in days} for user_id in requested_ids
+    }
+    social_intervals: dict[date, list[tuple[datetime, datetime]]] = {
+        day: [] for day in days
+    }
+
+    with open_database(database_path) as connection:
+        friend_table = find_friend_table(connection)
+        parameters: dict[str, object] = {
+            "start_at": sqlite_timestamp(range_start),
+            "end_at": sqlite_timestamp(range_end),
+        }
+        user_filter = ""
+        if requested_ids:
+            placeholders = []
+            for index, user_id in enumerate(requested_ids):
+                key = f"user_{index}"
+                placeholders.append(f":{key}")
+                parameters[key] = user_id
+            user_filter = f"AND f.user_id IN ({', '.join(placeholders)})"
+        query = f"""
+            SELECT f.user_id, j.created_at, j.time
+            FROM gamelog_join_leave AS j
+            JOIN {quote_identifier(friend_table)} AS f ON f.user_id = j.user_id
+            WHERE j.type = 'OnPlayerLeft'
+              AND j.time > 0
+              AND julianday(j.created_at) > julianday(:start_at)
+              AND julianday(j.created_at) - (j.time / 86400000.0)
+                    < julianday(:end_at)
+              {user_filter}
+            ORDER BY j.created_at
+        """
+        for row in connection.execute(query, parameters):
+            user_id = row["user_id"]
+            totals.setdefault(user_id, {day: 0 for day in days})
+            event_end = datetime.fromisoformat(
+                row["created_at"].replace("Z", "+00:00")
+            ).astimezone(timezone.utc)
+            event_start = event_end - timedelta(milliseconds=row["time"])
+            cursor = max(event_start, range_start)
+            clipped_end = min(event_end, range_end)
+            while cursor < clipped_end:
+                local_cursor = cursor.astimezone(LOCAL_TIMEZONE)
+                day = local_cursor.date()
+                next_midnight_local = datetime.combine(
+                    day + timedelta(days=1), time.min, tzinfo=LOCAL_TIMEZONE
+                )
+                segment_end = min(
+                    clipped_end, next_midnight_local.astimezone(timezone.utc)
+                )
+                milliseconds = round((segment_end - cursor).total_seconds() * 1000)
+                totals[user_id][day] += milliseconds
+                social_intervals[day].append((cursor, segment_end))
+                cursor = segment_end
+
+    per_friend = {
+        user_id: [(day, daily[day]) for day in days]
+        for user_id, daily in totals.items()
+    }
+    social: list[tuple[date, int]] = []
+    for day in days:
+        merged = 0
+        current_start: datetime | None = None
+        current_end: datetime | None = None
+        for interval_start, interval_end in sorted(social_intervals[day]):
+            if current_end is None or interval_start > current_end:
+                if current_start is not None and current_end is not None:
+                    merged += round((current_end - current_start).total_seconds() * 1000)
+                current_start, current_end = interval_start, interval_end
+            elif interval_end > current_end:
+                current_end = interval_end
+        if current_start is not None and current_end is not None:
+            merged += round((current_end - current_start).total_seconds() * 1000)
+        social.append((day, merged))
+    return per_friend, social
+
+
+def load_overview_daily_series(
     database_path: Path, start_date: date, end_date: date
-) -> tuple[list[sqlite3.Row], str, int, list[tuple[date, int]]]:
+) -> tuple[list[tuple[date, int]], list[tuple[date, int]]]:
+    per_friend, social = load_local_daily_series(database_path, start_date, end_date)
+    person_time = []
+    for index, day in enumerate(
+        start_date + timedelta(days=offset)
+        for offset in range((end_date - start_date).days + 1)
+    ):
+        person_time.append(
+            (day, sum(series[index][1] for series in per_friend.values()))
+        )
+    return person_time, social
+
+
+def load_rankings(
+    database_path: Path,
+    start_date: date,
+    end_date: date,
+    friend_search: str = "",
+    minimum_minutes: int = 0,
+    result_limit: int | None = 50,
+) -> tuple[
+    list[sqlite3.Row], int, str, int, list[tuple[date, int]], list[tuple[date, int]]
+]:
     if end_date < start_date:
         raise ValueError("The end date must be on or after the start date.")
 
-    start_at = start_date.isoformat() + "T00:00:00.000Z"
-    end_exclusive = (end_date + timedelta(days=1)).isoformat() + "T00:00:00.000Z"
+    range_start, range_end = local_range_utc(start_date, end_date)
+    start_at = sqlite_timestamp(range_start)
+    end_exclusive = sqlite_timestamp(range_end)
 
     with open_database(database_path) as connection:
         friend_table = find_friend_table(connection)
@@ -82,75 +228,107 @@ def load_rankings(
         # created_at is the end of an encounter and time is its duration in ms.
         # MIN/MAX clip every encounter to the requested date interval.
         query = f"""
-            SELECT
-                f.user_id,
-                f.display_name,
-                COUNT(*) AS visits,
-                CAST(ROUND(SUM(MAX(0.0,
-                    (MIN(julianday(j.created_at), julianday(:end_at)) -
-                     MAX(julianday(j.created_at) - (j.time / 86400000.0),
-                         julianday(:start_at))) * 86400000.0
-                ))) AS INTEGER) AS milliseconds
-            FROM gamelog_join_leave AS j
-            JOIN {quote_identifier(friend_table)} AS f ON f.user_id = j.user_id
-            WHERE j.type = 'OnPlayerLeft'
-              AND j.time > 0
-              AND julianday(j.created_at) > julianday(:start_at)
-              AND julianday(j.created_at) - (j.time / 86400000.0)
-                    < julianday(:end_at)
-            GROUP BY f.user_id, f.display_name
-            HAVING milliseconds > 0
-            ORDER BY milliseconds DESC, f.display_name COLLATE NOCASE
-            LIMIT 25
-        """
-        rows = list(
-            connection.execute(
-                query, {"start_at": start_at, "end_at": end_exclusive}
-            )
-        )
-        # Split encounters at UTC midnight so a session crossing two dates is
-        # represented accurately on the daily chart. The recursive calendar
-        # also preserves zero-activity days, which makes lows visible.
-        daily_query = f"""
-            WITH RECURSIVE days(day) AS (
-                VALUES(date(:start_at))
-                UNION ALL
-                SELECT date(day, '+1 day') FROM days WHERE day < date(:last_day)
-            ), friend_events AS (
-                SELECT j.created_at, j.time
+            WITH rankings AS (
+                SELECT
+                    f.user_id,
+                    f.display_name,
+                    COUNT(*) AS visits,
+                    CAST(ROUND(SUM(MAX(0.0,
+                        (MIN(julianday(j.created_at), julianday(:end_at)) -
+                         MAX(julianday(j.created_at) - (j.time / 86400000.0),
+                             julianday(:start_at))) * 86400000.0
+                    ))) AS INTEGER) AS milliseconds
                 FROM gamelog_join_leave AS j
                 JOIN {quote_identifier(friend_table)} AS f ON f.user_id = j.user_id
-                WHERE j.type = 'OnPlayerLeft' AND j.time > 0
+                WHERE j.type = 'OnPlayerLeft'
+                  AND j.time > 0
                   AND julianday(j.created_at) > julianday(:start_at)
                   AND julianday(j.created_at) - (j.time / 86400000.0)
                         < julianday(:end_at)
+                GROUP BY f.user_id, f.display_name
             )
-            SELECT d.day,
-                   CAST(ROUND(COALESCE(SUM(MAX(0.0,
-                       (MIN(julianday(e.created_at), julianday(d.day, '+1 day')) -
-                        MAX(julianday(e.created_at) - (e.time / 86400000.0),
-                            julianday(d.day))) * 86400000.0
-                   )), 0)) AS INTEGER) AS milliseconds
-            FROM days AS d
-            LEFT JOIN friend_events AS e
-              ON julianday(e.created_at) > julianday(d.day)
-             AND julianday(e.created_at) - (e.time / 86400000.0)
-                    < julianday(d.day, '+1 day')
-            GROUP BY d.day
-            ORDER BY d.day
+            SELECT user_id, display_name, visits, milliseconds
+            FROM rankings
+            WHERE milliseconds > 0
+              AND milliseconds >= :minimum_ms
+              AND display_name LIKE :friend_search ESCAPE '\\'
+            ORDER BY milliseconds DESC, display_name COLLATE NOCASE
         """
-        daily = [
-            (date.fromisoformat(row["day"]), row["milliseconds"])
-            for row in connection.execute(
-                daily_query,
+        search_pattern = (
+            "%"
+            + friend_search.strip()
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+            + "%"
+        )
+        all_rows = list(
+            connection.execute(
+                query,
                 {
                     "start_at": start_at,
                     "end_at": end_exclusive,
-                    "last_day": end_date.isoformat(),
+                    "minimum_ms": max(0, minimum_minutes) * 60_000,
+                    "friend_search": search_pattern,
                 },
             )
-        ]
-    return rows, latest_at or "No activity", friend_count, daily
+        )
+        matching_count = len(all_rows)
+        rows = all_rows if result_limit is None else all_rows[:result_limit]
+    daily, social_daily = load_overview_daily_series(
+        database_path, start_date, end_date
+    )
+    return (
+        rows,
+        matching_count,
+        latest_at or "No activity",
+        friend_count,
+        daily,
+        social_daily,
+    )
+
+
+def load_friend_daily_series(
+    database_path: Path, start_date: date, end_date: date, user_id: str
+) -> list[tuple[date, int]]:
+    series, _social = load_local_daily_series(
+        database_path, start_date, end_date, [user_id]
+    )
+    return series[user_id]
+
+
+def load_friends_daily_series(
+    database_path: Path, start_date: date, end_date: date, user_ids: list[str]
+) -> dict[str, list[tuple[date, int]]]:
+    series, _social = load_local_daily_series(
+        database_path, start_date, end_date, user_ids
+    )
+    return series
+
+
+def load_social_daily_series(
+    database_path: Path, start_date: date, end_date: date
+) -> list[tuple[date, int]]:
+    _per_friend, social = load_local_daily_series(
+        database_path, start_date, end_date
+    )
+    return social
+
+
+def aggregate_time_series(
+    daily: list[tuple[date, int]], granularity: str
+) -> list[tuple[date, int]]:
+    """Aggregate daily points while preserving a chronological series."""
+    if granularity == "Daily":
+        return daily
+    totals: dict[date, int] = {}
+    for day, milliseconds in daily:
+        if granularity == "Weekly":
+            bucket = day - timedelta(days=day.weekday())
+        else:
+            bucket = day.replace(day=1)
+        totals[bucket] = totals.get(bucket, 0) + milliseconds
+    return list(totals.items())
 
 
 def format_duration(milliseconds: int) -> str:
@@ -364,18 +542,29 @@ class MetricCard(tk.Frame):
         self.detail.configure(text=detail)
 
 
-class DailyChart(tk.Canvas):
-    """Dependency-free daily area chart with hover values."""
+class TimeSeriesChart(tk.Canvas):
+    """Interactive multi-series comparison chart with shared hover values."""
 
     def __init__(self, parent: tk.Widget) -> None:
-        super().__init__(parent, bg=PANEL, height=225, bd=0, highlightthickness=0)
+        super().__init__(parent, bg=PANEL, height=240, bd=0, highlightthickness=0)
+        self.series_list: list[tuple[str, list[tuple[date, int]], str]] = []
         self.series: list[tuple[date, int]] = []
+        self.granularity = "Daily"
+        self.metric_label = "Time with friends"
         self.bind("<Configure>", lambda _event: self.redraw())
         self.bind("<Motion>", self._hover)
         self.bind("<Leave>", lambda _event: self.delete("hover"))
 
-    def set_data(self, series: list[tuple[date, int]]) -> None:
-        self.series = series
+    def set_series(
+        self,
+        series_list: list[tuple[str, list[tuple[date, int]], str]],
+        granularity: str,
+        metric_label: str,
+    ) -> None:
+        self.series_list = series_list
+        self.series = series_list[0][1] if series_list else []
+        self.granularity = granularity
+        self.metric_label = metric_label
         self.redraw()
 
     @staticmethod
@@ -389,18 +578,46 @@ class DailyChart(tk.Canvas):
         if width < 200 or height < 130:
             return
         self.create_text(
-            17, 14, text="DAILY PERSON-TIME", fill=TEXT, anchor="nw",
+            17, 14,
+            text=f"{self.granularity.upper()} {self.metric_label.upper()}",
+            fill=TEXT, anchor="nw",
             font=("Segoe UI Semibold", 10),
         )
         self.create_text(
-            width - 17, 14, text="UTC · hover for details", fill=MUTED,
+            width - 17, 14,
+            text=f"Local time · {LOCAL_TIMEZONE_NAME} · hover for details",
+            fill=MUTED,
             anchor="ne", font=("Segoe UI", 8),
         )
-        left, top, right, bottom = 55, 43, width - 17, height - 30
-        if not self.series:
+        left, top, right, bottom = 55, 61, width - 17, height - 30
+        if not self.series_list or not self.series:
             self.create_text(width / 2, height / 2, text="No activity", fill=MUTED)
             return
-        maximum = max(value for _, value in self.series)
+        legend_x = left
+        for index, (name, _series, color) in enumerate(self.series_list):
+            label = name if len(name) <= 15 else name[:14] + "…"
+            needed = 18 + len(label) * 6
+            if legend_x + needed > right:
+                remaining = len(self.series_list) - index
+                self.create_text(
+                    legend_x, 40, text=f"+{remaining} more", fill=MUTED,
+                    anchor="w", font=("Segoe UI", 8),
+                )
+                break
+            self.create_oval(
+                legend_x, 36, legend_x + 7, 43, fill=color, outline=""
+            )
+            self.create_text(
+                legend_x + 11, 40, text=label, fill=TEXT,
+                anchor="w", font=("Segoe UI", 8),
+            )
+            legend_x += needed
+
+        maximum = max(
+            value
+            for _name, series, _color in self.series_list
+            for _day, value in series
+        )
         scale = maximum * 1.1 if maximum else 3_600_000
         for index in range(4):
             y = top + (bottom - top) * index / 3
@@ -408,23 +625,30 @@ class DailyChart(tk.Canvas):
             self.create_line(left, y, right, y, fill=GRID)
             self.create_text(left - 7, y, text=self._axis_label(value), fill=MUTED, anchor="e", font=("Segoe UI", 8))
         count = len(self.series)
-        points: list[float] = []
-        for index, (_day, value) in enumerate(self.series):
-            x = left if count == 1 else left + (right - left) * index / (count - 1)
-            y = bottom - (bottom - top) * value / scale
-            points += [x, y]
-        if count > 1:
-            self.create_polygon(left, bottom, *points, right, bottom, fill="#282451", outline="")
-            self.create_line(*points, fill=ACCENT_HOVER, width=2, smooth=count < 45)
-        else:
-            self.create_oval(points[0] - 3, points[1] - 3, points[0] + 3, points[1] + 3, fill=ACCENT)
+        for series_index, (_name, series, color) in enumerate(self.series_list):
+            points: list[float] = []
+            for index, (_day, value) in enumerate(series):
+                x = left if count == 1 else left + (right - left) * index / (count - 1)
+                y = bottom - (bottom - top) * value / scale
+                points += [x, y]
+            if count > 1:
+                if len(self.series_list) == 1:
+                    self.create_polygon(
+                        left, bottom, *points, right, bottom,
+                        fill="#282451", outline="",
+                    )
+                self.create_line(*points, fill=GRID, width=6, smooth=count < 45)
+                self.create_line(*points, fill=color, width=2, smooth=count < 45)
+            elif points:
+                self.create_oval(
+                    points[0] - 3, points[1] - 3,
+                    points[0] + 3, points[1] + 3,
+                    fill=color, outline="",
+                )
         for index in sorted({0, count // 2, count - 1}):
             x = left if count == 1 else left + (right - left) * index / (count - 1)
-            self.create_text(x, bottom + 10, text=self.series[index][0].strftime("%d %b"), fill=MUTED, anchor="n", font=("Segoe UI", 8))
-        peak = max(range(count), key=lambda item: self.series[item][1])
-        x = left if count == 1 else left + (right - left) * peak / (count - 1)
-        y = points[peak * 2 + 1]
-        self.create_oval(x - 4, y - 4, x + 4, y + 4, fill=SUCCESS, outline=PANEL, width=2)
+            axis_format = "%b %Y" if self.granularity == "Monthly" else "%d %b"
+            self.create_text(x, bottom + 10, text=self.series[index][0].strftime(axis_format), fill=MUTED, anchor="n", font=("Segoe UI", 8))
 
     def _hover(self, event: tk.Event) -> None:
         self.delete("hover")
@@ -436,22 +660,57 @@ class DailyChart(tk.Canvas):
         count = len(self.series)
         index = 0 if count == 1 else round((event.x - left) * (count - 1) / (right - left))
         index = max(0, min(count - 1, index))
-        day, value = self.series[index]
+        day, _value = self.series[index]
         x = left if count == 1 else left + (right - left) * index / (count - 1)
-        label = f"{day:%a, %d %b %Y}  ·  {format_duration(value)}"
-        box_x = min(max(8, x - 91), self.winfo_width() - 190)
-        self.create_line(x, 42, x, self.winfo_height() - 30, fill=MUTED, dash=(3, 3), tags="hover")
-        self.create_rectangle(box_x, 47, box_x + 182, 74, fill=PANEL_ALT, outline=BORDER, tags="hover")
-        self.create_text(box_x + 8, 60, text=label, fill=TEXT, anchor="w", font=("Segoe UI", 8), tags="hover")
+        if self.granularity == "Weekly":
+            period = f"Week of {day:%d %b %Y}"
+        elif self.granularity == "Monthly":
+            period = f"{day:%B %Y}"
+        else:
+            period = f"{day:%a, %d %b %Y}"
+        values = [
+            (name, series[index][1], color)
+            for name, series, color in self.series_list
+        ]
+        longest = max([len(period)] + [len(name) + 12 for name, _value, _color in values])
+        box_width = max(205, min(310, longest * 6 + 24))
+        box_height = 29 + len(values) * 17
+        box_x = min(max(8, x - box_width / 2), self.winfo_width() - box_width - 8)
+        box_y = min(65, max(4, self.winfo_height() - 30 - box_height))
+        self.create_line(x, 60, x, self.winfo_height() - 30, fill=MUTED, dash=(3, 3), tags="hover")
+        self.create_rectangle(
+            box_x, box_y, box_x + box_width, box_y + box_height,
+            fill=PANEL_ALT, outline=BORDER, tags="hover",
+        )
+        self.create_text(
+            box_x + 9, box_y + 9, text=period, fill=TEXT,
+            anchor="nw", font=("Segoe UI Semibold", 8), tags="hover",
+        )
+        for row, (name, value, color) in enumerate(values):
+            y = box_y + 27 + row * 17
+            self.create_oval(box_x + 9, y, box_x + 16, y + 7, fill=color, outline="", tags="hover")
+            self.create_text(
+                box_x + 21, y + 3, text=f"{name}: {format_duration(value)}",
+                fill=TEXT, anchor="w", font=("Segoe UI", 8), tags="hover",
+            )
 
 
 class TopFriendsApp(tk.Tk):
     def __init__(self, database_path: Path) -> None:
         super().__init__()
         self.database_path = database_path
+        self._refresh_job: str | None = None
+        self._selected_user_ids: list[str] = []
+        self._selected_friend_names: dict[str, str] = {}
+        self._friend_series: dict[str, list[tuple[date, int]]] = {}
+        self._raw_series: list[tuple[date, int]] = []
+        self._overview_daily: list[tuple[date, int]] = []
+        self._social_daily: list[tuple[date, int]] = []
+        self._series_range: tuple[date, date] | None = None
+        self._suppress_selection_event = False
         self.title(APP_TITLE)
         self.geometry("1080x860")
-        self.minsize(860, 720)
+        self.minsize(960, 760)
         self.configure(bg=BG)
         self._configure_styles()
         self._build_ui()
@@ -484,6 +743,24 @@ class TopFriendsApp(tk.Tk):
             font=("Segoe UI Semibold", 9),
         )
         style.map("Friends.Treeview.Heading", background=[("active", PANEL_ALT)])
+        style.configure(
+            "Filter.TCombobox",
+            fieldbackground=PANEL_ALT,
+            background=PANEL_ALT,
+            foreground=TEXT,
+            arrowcolor=TEXT,
+            bordercolor=BORDER,
+            lightcolor=BORDER,
+            darkcolor=BORDER,
+            padding=7,
+        )
+        style.map(
+            "Filter.TCombobox",
+            fieldbackground=[("readonly", PANEL_ALT)],
+            foreground=[("readonly", TEXT)],
+            selectbackground=[("readonly", PANEL_ALT)],
+            selectforeground=[("readonly", TEXT)],
+        )
 
     def _build_ui(self) -> None:
         container = tk.Frame(self, bg=BG)
@@ -500,7 +777,7 @@ class TopFriendsApp(tk.Tk):
         ).pack(anchor="w")
         tk.Label(
             heading,
-            text="Grafana-style person-time metrics from your VRCX history",
+            text="Explore who you spend time with using your local VRCX history",
             bg=BG,
             fg=MUTED,
             font=("Segoe UI", 10),
@@ -534,6 +811,93 @@ class TopFriendsApp(tk.Tk):
             cursor="hand2",
             font=("Segoe UI Semibold", 10),
         ).pack(side="right", pady=(18, 0))
+
+        tk.Frame(controls, bg=BORDER, height=1).pack(fill="x")
+        filters = tk.Frame(controls, bg=PANEL)
+        filters.pack(fill="x", padx=18, pady=(12, 15))
+
+        search_group = tk.Frame(filters, bg=PANEL)
+        search_group.pack(side="left", padx=(0, 18))
+        tk.Label(
+            search_group,
+            text="FIND A FRIEND",
+            bg=PANEL,
+            fg=MUTED,
+            font=("Segoe UI Semibold", 8),
+        ).pack(anchor="w", pady=(0, 5))
+        self.search_variable = tk.StringVar()
+        self.search_entry = tk.Entry(
+            search_group,
+            textvariable=self.search_variable,
+            bg=PANEL_ALT,
+            fg=TEXT,
+            insertbackground=TEXT,
+            selectbackground=ACCENT,
+            relief="flat",
+            bd=0,
+            width=31,
+            font=("Segoe UI", 10),
+        )
+        self.search_entry.pack(ipady=8, ipadx=9)
+        self.search_entry.bind("<KeyRelease>", self.schedule_refresh)
+
+        minimum_group = tk.Frame(filters, bg=PANEL)
+        minimum_group.pack(side="left", padx=(0, 18))
+        tk.Label(
+            minimum_group,
+            text="MINIMUM TIME",
+            bg=PANEL,
+            fg=MUTED,
+            font=("Segoe UI Semibold", 8),
+        ).pack(anchor="w", pady=(0, 5))
+        self.minimum_variable = tk.StringVar(value="Any time")
+        minimum_box = ttk.Combobox(
+            minimum_group,
+            textvariable=self.minimum_variable,
+            values=("Any time", "15 minutes", "1 hour", "5 hours", "10 hours"),
+            state="readonly",
+            width=14,
+            style="Filter.TCombobox",
+        )
+        minimum_box.pack()
+        minimum_box.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
+
+        limit_group = tk.Frame(filters, bg=PANEL)
+        limit_group.pack(side="left")
+        tk.Label(
+            limit_group,
+            text="SHOW",
+            bg=PANEL,
+            fg=MUTED,
+            font=("Segoe UI Semibold", 8),
+        ).pack(anchor="w", pady=(0, 5))
+        self.limit_variable = tk.StringVar(value="Top 50")
+        limit_box = ttk.Combobox(
+            limit_group,
+            textvariable=self.limit_variable,
+            values=("Top 25", "Top 50", "Top 100", "All matches"),
+            state="readonly",
+            width=13,
+            style="Filter.TCombobox",
+        )
+        limit_box.pack()
+        limit_box.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
+
+        tk.Button(
+            filters,
+            text="Clear filters",
+            command=self.clear_filters,
+            bg=PANEL,
+            fg=MUTED,
+            activebackground=PANEL_ALT,
+            activeforeground=TEXT,
+            relief="flat",
+            bd=0,
+            padx=10,
+            pady=8,
+            cursor="hand2",
+            font=("Segoe UI", 9),
+        ).pack(side="right", pady=(17, 0))
 
         presets = tk.Frame(container, bg=BG)
         presets.pack(fill="x", pady=(0, 12))
@@ -593,17 +957,39 @@ class TopFriendsApp(tk.Tk):
             )
             metrics.grid_columnconfigure(index, weight=1, uniform="metric")
 
+        dashboard_body = tk.Frame(container, bg=BG)
+        dashboard_body.pack(fill="both", expand=True, pady=(0, 28))
+        dashboard_body.grid_rowconfigure(0, weight=1)
+        dashboard_body.grid_columnconfigure(0, weight=1, uniform="dashboard")
+        dashboard_body.grid_columnconfigure(1, weight=1, uniform="dashboard")
+
         table_frame = tk.Frame(
-            container, bg=PANEL, highlightthickness=1, highlightbackground=BORDER
+            dashboard_body, bg=PANEL, highlightthickness=1, highlightbackground=BORDER
         )
-        table_frame.pack(fill="both", expand=True)
+        table_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        table_header = tk.Frame(table_frame, bg=PANEL)
+        table_header.pack(fill="x", padx=14, pady=(11, 9))
+        tk.Label(
+            table_header,
+            text="FRIEND RANKING",
+            bg=PANEL,
+            fg=TEXT,
+            font=("Segoe UI Semibold", 10),
+        ).pack(side="left")
+        self.ranking_summary = tk.Label(
+            table_header,
+            text="",
+            bg=PANEL,
+            fg=MUTED,
+            font=("Segoe UI", 9),
+        )
+        self.ranking_summary.pack(side="right")
         self.tree = ttk.Treeview(
             table_frame,
             columns=("rank", "friend", "duration", "visits"),
             show="headings",
             style="Friends.Treeview",
-            selectmode="browse",
-            height=4,
+            selectmode="extended",
         )
         self.tree.heading("rank", text="#", anchor="center")
         self.tree.heading("friend", text="FRIEND", anchor="w")
@@ -617,25 +1003,96 @@ class TopFriendsApp(tk.Tk):
             table_frame, orient="vertical", command=self.tree.yview
         )
         self.tree.configure(yscrollcommand=table_scrollbar.set)
-        table_scrollbar.pack(side="right", fill="y", padx=(0, 1), pady=1)
-        self.tree.pack(fill="both", expand=True, padx=(1, 0), pady=1)
+        self.tree.bind("<<TreeviewSelect>>", self.show_selected_friends)
+        table_scrollbar.pack(side="right", fill="y", padx=(0, 1), pady=(0, 1))
+        self.tree.pack(fill="both", expand=True, padx=(1, 0), pady=(0, 1))
+        self.empty_state = tk.Label(
+            table_frame,
+            text="No friends match these filters\nTry a longer date range or clear the ranking filters.",
+            bg=PANEL,
+            fg=MUTED,
+            justify="center",
+            font=("Segoe UI", 10),
+        )
 
         chart_frame = tk.Frame(
-            container, bg=PANEL, highlightthickness=1, highlightbackground=BORDER
+            dashboard_body, bg=PANEL, highlightthickness=1, highlightbackground=BORDER
         )
-        chart_frame.pack(fill="x", pady=(12, 0))
-        self.chart = DailyChart(chart_frame)
-        self.chart.pack(fill="x", padx=1, pady=1)
+        chart_frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        series_header = tk.Frame(chart_frame, bg=PANEL)
+        series_header.pack(fill="x", padx=14, pady=(10, 4))
+        tk.Label(
+            series_header,
+            text="TIME SERIES",
+            bg=PANEL,
+            fg=TEXT,
+            font=("Segoe UI Semibold", 10),
+        ).pack(side="left")
+        self.series_context = tk.Label(
+            series_header,
+            text="Social time · loading…",
+            bg=PANEL,
+            fg=MUTED,
+            font=("Segoe UI", 9),
+        )
+        self.series_context.pack(side="right")
+        series_controls = tk.Frame(chart_frame, bg=PANEL)
+        series_controls.pack(fill="x", padx=14, pady=(0, 3))
+        self.granularity_variable = tk.StringVar(value="Daily")
+        granularity_box = ttk.Combobox(
+            series_controls,
+            textvariable=self.granularity_variable,
+            values=("Daily", "Weekly", "Monthly"),
+            state="readonly",
+            width=10,
+            style="Filter.TCombobox",
+        )
+        granularity_box.pack(side="right")
+        granularity_box.bind(
+            "<<ComboboxSelected>>", lambda _event: self.render_time_series()
+        )
+        self.metric_variable = tk.StringVar(value="Time with friends")
+        self.metric_box = ttk.Combobox(
+            series_controls,
+            textvariable=self.metric_variable,
+            values=("Time with friends", "Person-time"),
+            state="readonly",
+            width=17,
+            style="Filter.TCombobox",
+        )
+        self.metric_box.pack(side="right", padx=(0, 8))
+        self.metric_box.bind(
+            "<<ComboboxSelected>>", lambda _event: self.show_overview_series()
+        )
+        self.overview_button = tk.Button(
+            series_controls,
+            text="All friends",
+            command=self.show_overview_series,
+            bg=PANEL_ALT,
+            fg=TEXT,
+            activebackground=ACCENT,
+            activeforeground="white",
+            relief="flat",
+            bd=0,
+            padx=11,
+            pady=6,
+            cursor="hand2",
+            font=("Segoe UI", 9),
+            state="disabled",
+        )
+        self.overview_button.pack(side="right", padx=(0, 8))
+        self.chart = TimeSeriesChart(chart_frame)
+        self.chart.pack(fill="both", expand=True, padx=1, pady=1)
 
         footer = tk.Frame(container, bg=BG)
-        footer.pack(fill="x", pady=(12, 0))
+        footer.place(relx=0, rely=1, relwidth=1, anchor="sw")
         self.status = tk.Label(
             footer, text="Loading…", bg=BG, fg=MUTED, font=("Segoe UI", 9)
         )
         self.status.pack(side="left")
         tk.Label(
             footer,
-            text="Dates use VRCX's UTC event timestamps",
+            text=f"Dates use local time · {LOCAL_TIMEZONE_NAME}",
             bg=BG,
             fg=MUTED,
             font=("Segoe UI", 9),
@@ -650,6 +1107,132 @@ class TopFriendsApp(tk.Tk):
         self.end_field.set(end)
         self.refresh()
 
+    def schedule_refresh(self, _event: tk.Event | None = None) -> None:
+        """Debounce text filtering so typing stays responsive."""
+        if self._refresh_job is not None:
+            self.after_cancel(self._refresh_job)
+        self._refresh_job = self.after(300, self.refresh)
+
+    def clear_filters(self) -> None:
+        self.search_variable.set("")
+        self.minimum_variable.set("Any time")
+        self.limit_variable.set("Top 50")
+        self.search_entry.focus_set()
+        self.refresh()
+
+    def ranking_filters(self) -> tuple[int, int | None]:
+        minimums = {
+            "Any time": 0,
+            "15 minutes": 15,
+            "1 hour": 60,
+            "5 hours": 300,
+            "10 hours": 600,
+        }
+        limits = {
+            "Top 25": 25,
+            "Top 50": 50,
+            "Top 100": 100,
+            "All matches": None,
+        }
+        return (
+            minimums.get(self.minimum_variable.get(), 0),
+            limits.get(self.limit_variable.get(), 50),
+        )
+
+    def render_time_series(self) -> None:
+        granularity = self.granularity_variable.get()
+        if self._selected_user_ids:
+            series_list = [
+                (
+                    self._selected_friend_names.get(user_id, "Friend"),
+                    aggregate_time_series(self._friend_series[user_id], granularity),
+                    SERIES_COLORS[index % len(SERIES_COLORS)],
+                )
+                for index, user_id in enumerate(self._selected_user_ids)
+                if user_id in self._friend_series
+            ]
+            metric_label = "Time together"
+            count = len(series_list)
+            context = (
+                f"Comparing {count} friend{'s' if count != 1 else ''} · "
+                "Ctrl-click rows to add or remove"
+            )
+        elif self.metric_variable.get() == "Person-time":
+            total = sum(value for _day, value in self._raw_series)
+            series_list = [
+                (
+                    "All current friends",
+                    aggregate_time_series(self._raw_series, granularity),
+                    ACCENT_HOVER,
+                )
+            ]
+            metric_label = "Person-time"
+            context = f"Total person-time · {format_duration(total)} · overlaps count per friend"
+        else:
+            total = sum(value for _day, value in self._raw_series)
+            series_list = [
+                (
+                    "All current friends",
+                    aggregate_time_series(self._raw_series, granularity),
+                    ACCENT_HOVER,
+                )
+            ]
+            metric_label = "Time with friends"
+            context = f"Social time · {format_duration(total)} · overlaps counted once"
+        self.series_context.configure(text=context)
+        self.chart.set_series(series_list, granularity, metric_label)
+
+    def show_overview_series(self) -> None:
+        self._selected_user_ids = []
+        self._selected_friend_names = {}
+        self._friend_series = {}
+        self._series_range = None
+        self._raw_series = (
+            self._overview_daily
+            if self.metric_variable.get() == "Person-time"
+            else self._social_daily
+        )
+        selection = self.tree.selection()
+        if selection:
+            self._suppress_selection_event = True
+            self.tree.selection_remove(*selection)
+            self._suppress_selection_event = False
+        self.overview_button.configure(state="disabled")
+        self.metric_box.configure(state="readonly")
+        self.render_time_series()
+
+    def show_selected_friends(self, _event: tk.Event | None = None) -> None:
+        if self._suppress_selection_event:
+            return
+        selection = list(self.tree.selection())
+        if not selection:
+            self.show_overview_series()
+            return
+        friend_names = {
+            user_id: str(self.tree.item(user_id, "values")[1])
+            for user_id in selection
+            if len(self.tree.item(user_id, "values")) >= 2
+        }
+        selection = [user_id for user_id in selection if user_id in friend_names]
+        try:
+            start = self.start_field.get()
+            end = self.end_field.get()
+            if self._selected_user_ids == selection and self._series_range == (start, end):
+                return
+            series = load_friends_daily_series(
+                self.database_path, start, end, selection
+            )
+        except (ValueError, RuntimeError, sqlite3.Error, OSError) as error:
+            messagebox.showerror(APP_TITLE, str(error), parent=self)
+            return
+        self._selected_user_ids = selection
+        self._selected_friend_names = friend_names
+        self._series_range = (start, end)
+        self._friend_series = series
+        self.overview_button.configure(state="normal")
+        self.metric_box.configure(state="disabled")
+        self.render_time_series()
+
     def set_all_time(self) -> None:
         try:
             with open_database(self.database_path) as connection:
@@ -658,29 +1241,51 @@ class TopFriendsApp(tk.Tk):
                 ).fetchone()[0]
             if not earliest_at:
                 raise RuntimeError("No activity was found in the database.")
-            self.start_field.set(date.fromisoformat(earliest_at[:10]))
+            earliest_local = datetime.fromisoformat(
+                earliest_at.replace("Z", "+00:00")
+            ).astimezone(LOCAL_TIMEZONE)
+            self.start_field.set(earliest_local.date())
             self.end_field.set(date.today())
             self.refresh()
         except (ValueError, RuntimeError, sqlite3.Error, OSError) as error:
             messagebox.showerror(APP_TITLE, str(error), parent=self)
 
     def refresh(self) -> None:
+        self._refresh_job = None
+        self.status.configure(text="Updating dashboard…")
+        self.update_idletasks()
         try:
             start = self.start_field.get()
             end = self.end_field.get()
-            rows, latest_at, friend_count, daily = load_rankings(
-                self.database_path, start, end
+            minimum_minutes, result_limit = self.ranking_filters()
+            (
+                rows,
+                matching_count,
+                latest_at,
+                friend_count,
+                daily,
+                social_daily,
+            ) = load_rankings(
+                self.database_path,
+                start,
+                end,
+                friend_search=self.search_variable.get(),
+                minimum_minutes=minimum_minutes,
+                result_limit=result_limit,
             )
         except (ValueError, RuntimeError, sqlite3.Error, OSError) as error:
             messagebox.showerror(APP_TITLE, str(error), parent=self)
             return
 
+        selected_user_ids = list(self._selected_user_ids)
+        self._suppress_selection_event = True
         for item in self.tree.get_children():
             self.tree.delete(item)
         for rank, row in enumerate(rows, start=1):
             self.tree.insert(
                 "",
                 "end",
+                iid=row["user_id"],
                 values=(
                     rank,
                     row["display_name"],
@@ -688,6 +1293,21 @@ class TopFriendsApp(tk.Tk):
                     row["visits"],
                 ),
             )
+        self._suppress_selection_event = False
+        if rows:
+            self.empty_state.place_forget()
+        else:
+            self.empty_state.place(relx=0.5, rely=0.56, anchor="center")
+            self.empty_state.lift()
+
+        if len(rows) < matching_count:
+            ranking_text = f"Showing {len(rows)} of {matching_count} · Ctrl-click to compare"
+        else:
+            ranking_text = (
+                f"{matching_count} match{'es' if matching_count != 1 else ''}"
+                " · Ctrl-click to compare"
+            )
+        self.ranking_summary.configure(text=ranking_text)
 
         total = sum(milliseconds for _day, milliseconds in daily)
         average = round(total / max(1, len(daily)))
@@ -702,26 +1322,61 @@ class TopFriendsApp(tk.Tk):
         self.low_card.set(
             format_duration(low_value), low_day.strftime("%a, %d %b %Y") if low_day else "No data"
         )
-        self.chart.set_data(daily)
-
-        if rows:
-            summary = f"{len(rows)} shown · {encounters:,} encounters among shown friends · {friend_count} current friends · Latest data {latest_at[:10]}"
+        self._overview_daily = daily
+        self._social_daily = social_daily
+        visible_ids = {row["user_id"] for row in rows}
+        visible_selection = [
+            user_id for user_id in selected_user_ids if user_id in visible_ids
+        ]
+        if visible_selection:
+            self._series_range = None
+            self._suppress_selection_event = True
+            self.tree.selection_set(visible_selection)
+            self.tree.focus(visible_selection[0])
+            self._suppress_selection_event = False
+            self.show_selected_friends()
         else:
-            summary = f"No completed encounters in this range · Latest data {latest_at[:10]}"
+            self.show_overview_series()
+
+        if latest_at == "No activity":
+            latest_label = latest_at
+        else:
+            latest_local = datetime.fromisoformat(
+                latest_at.replace("Z", "+00:00")
+            ).astimezone(LOCAL_TIMEZONE)
+            latest_label = latest_local.strftime("%Y-%m-%d %H:%M")
+        if rows:
+            summary = (
+                f"{start:%d %b %Y} – {end:%d %b %Y} · "
+                f"{encounters:,} encounters in visible ranking · "
+                f"{friend_count} current friends · Latest data {latest_label}"
+            )
+        elif matching_count == 0:
+            summary = (
+                f"No ranking matches · {friend_count} current friends · "
+                f"Latest data {latest_label}"
+            )
+        else:
+            summary = f"No visible rankings · Latest data {latest_label}"
         self.status.configure(text=summary)
 
 
 def run_check(database_path: Path) -> int:
     end = date.today()
-    rows, latest_at, friend_count, daily = load_rankings(
+    rows, matching_count, latest_at, friend_count, daily, social_daily = load_rankings(
         database_path, end - timedelta(days=6), end
     )
     total = sum(value for _day, value in daily)
+    social_total = sum(value for _day, value in social_daily)
+    if social_total > total:
+        raise RuntimeError("Social time cannot exceed total person-time.")
     peak_day, peak_value = max(daily, key=lambda item: item[1])
     print(
-        f"OK: {len(rows)} rankings, {friend_count} current friends, "
-        f"{len(daily)} daily points, {format_duration(total)} person-time, "
-        f"peak {peak_day} ({format_duration(peak_value)}), latest activity {latest_at}"
+        f"OK: {len(rows)} of {matching_count} rankings, {friend_count} current friends, "
+        f"{len(daily)} daily points, {format_duration(social_total)} social time, "
+        f"{format_duration(total)} person-time, "
+        f"peak {peak_day} ({format_duration(peak_value)}), "
+        f"timezone {LOCAL_TIMEZONE_NAME}, latest activity {latest_at}"
     )
     return 0
 
