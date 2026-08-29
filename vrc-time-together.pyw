@@ -1,353 +1,54 @@
 from __future__ import annotations
 
 import calendar
-import os
+import hashlib
+import logging
 import sqlite3
 import sys
 import tkinter as tk
-from datetime import date, datetime, time, timedelta, timezone
+from concurrent.futures import Future, ThreadPoolExecutor
+from datetime import date, timedelta
 from pathlib import Path
 from tkinter import messagebox, ttk
 
-try:
-    from tzlocal import get_localzone
-except ImportError:
-    get_localzone = None
-
+from vrc_time_together.formatting import (
+    format_duration as format_duration_modern,
+    format_local_date,
+    format_local_datetime,
+)
+from vrc_time_together.models import AppState, ComparisonData, DashboardData, FriendStat
+from vrc_time_together.logging_utils import configure_logging
+from vrc_time_together.repository import (
+    VrcxDataError,
+    VrcxRepository,
+    aggregate_time_series as aggregate_series,
+    find_database as locate_database,
+)
+from vrc_time_together.theme import (
+    ACCENT,
+    ACCENT_HOVER,
+    BG,
+    BORDER,
+    FONT_BODY,
+    FONT_LABEL,
+    FONT_METRIC,
+    FONT_SECTION,
+    FONT_SMALL,
+    FONT_TITLE,
+    GRID,
+    MUTED,
+    PANEL,
+    PANEL_ALT,
+    PANEL_HOVER,
+    SERIES_COLORS,
+    SIDEBAR,
+    SUCCESS,
+    TEXT,
+    WARNING,
+)
+from vrc_time_together.timezone_utils import LOCAL_TIMEZONE, LOCAL_TIMEZONE_NAME
 
 APP_TITLE = "VRCX · Time Together"
-DB_NAME = "VRCX.sqlite3"
-
-BG = "#0d1117"
-PANEL = "#161b22"
-PANEL_ALT = "#1d2430"
-TEXT = "#f0f3f6"
-MUTED = "#8b949e"
-ACCENT = "#7c6cff"
-ACCENT_HOVER = "#9185ff"
-BORDER = "#30363d"
-SUCCESS = "#56d364"
-WARNING = "#f2cc60"
-GRID = "#28313b"
-LOCAL_TIMEZONE = (
-    get_localzone() if get_localzone is not None else datetime.now().astimezone().tzinfo
-)
-_local_now = datetime.now(LOCAL_TIMEZONE)
-_local_offset = _local_now.strftime("%z")
-_local_offset = _local_offset[:3] + ":" + _local_offset[3:]
-LOCAL_TIMEZONE_NAME = f"{_local_now.tzname()} · UTC{_local_offset}"
-SERIES_COLORS = (
-    "#9185ff", "#58a6ff", "#56d364", "#f2cc60", "#ff7b72",
-    "#d2a8ff", "#79c0ff", "#7ee787", "#ffa657", "#ff9bce",
-)
-
-
-def quote_identifier(value: str) -> str:
-    return '"' + value.replace('"', '""') + '"'
-
-
-def open_database(database_path: Path) -> sqlite3.Connection:
-    uri = database_path.resolve().as_uri() + "?mode=ro"
-    connection = sqlite3.connect(uri, uri=True, timeout=5)
-    connection.row_factory = sqlite3.Row
-    return connection
-
-
-def local_range_utc(start_date: date, end_date: date) -> tuple[datetime, datetime]:
-    start = datetime.combine(start_date, time.min, tzinfo=LOCAL_TIMEZONE)
-    end = datetime.combine(
-        end_date + timedelta(days=1), time.min, tzinfo=LOCAL_TIMEZONE
-    )
-    return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
-
-
-def sqlite_timestamp(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace(
-        "+00:00", "Z"
-    )
-
-
-def find_friend_table(connection: sqlite3.Connection) -> str:
-    tables = [
-        row[0]
-        for row in connection.execute(
-            """
-            SELECT name
-            FROM sqlite_master
-            WHERE type = 'table' AND name LIKE 'usr%_friend_log_current'
-            """
-        )
-    ]
-    if not tables:
-        raise RuntimeError("No VRCX current-friends table was found.")
-
-    # A database can contain data for several accounts. The table with the
-    # largest current friend list is the most likely active account.
-    return max(
-        tables,
-        key=lambda table: connection.execute(
-            f"SELECT COUNT(*) FROM {quote_identifier(table)}"
-        ).fetchone()[0],
-    )
-
-
-def load_local_daily_series(
-    database_path: Path,
-    start_date: date,
-    end_date: date,
-    user_ids: list[str] | None = None,
-) -> tuple[dict[str, list[tuple[date, int]]], list[tuple[date, int]]]:
-    """Split friend encounters at local midnight and merge social overlaps."""
-    if end_date < start_date:
-        raise ValueError("The end date must be on or after the start date.")
-    days = [
-        start_date + timedelta(days=index)
-        for index in range((end_date - start_date).days + 1)
-    ]
-    range_start, range_end = local_range_utc(start_date, end_date)
-    requested_ids = list(dict.fromkeys(user_ids or []))
-    totals: dict[str, dict[date, int]] = {
-        user_id: {day: 0 for day in days} for user_id in requested_ids
-    }
-    social_intervals: dict[date, list[tuple[datetime, datetime]]] = {
-        day: [] for day in days
-    }
-
-    with open_database(database_path) as connection:
-        friend_table = find_friend_table(connection)
-        parameters: dict[str, object] = {
-            "start_at": sqlite_timestamp(range_start),
-            "end_at": sqlite_timestamp(range_end),
-        }
-        user_filter = ""
-        if requested_ids:
-            placeholders = []
-            for index, user_id in enumerate(requested_ids):
-                key = f"user_{index}"
-                placeholders.append(f":{key}")
-                parameters[key] = user_id
-            user_filter = f"AND f.user_id IN ({', '.join(placeholders)})"
-        query = f"""
-            SELECT f.user_id, j.created_at, j.time
-            FROM gamelog_join_leave AS j
-            JOIN {quote_identifier(friend_table)} AS f ON f.user_id = j.user_id
-            WHERE j.type = 'OnPlayerLeft'
-              AND j.time > 0
-              AND julianday(j.created_at) > julianday(:start_at)
-              AND julianday(j.created_at) - (j.time / 86400000.0)
-                    < julianday(:end_at)
-              {user_filter}
-            ORDER BY j.created_at
-        """
-        for row in connection.execute(query, parameters):
-            user_id = row["user_id"]
-            totals.setdefault(user_id, {day: 0 for day in days})
-            event_end = datetime.fromisoformat(
-                row["created_at"].replace("Z", "+00:00")
-            ).astimezone(timezone.utc)
-            event_start = event_end - timedelta(milliseconds=row["time"])
-            cursor = max(event_start, range_start)
-            clipped_end = min(event_end, range_end)
-            while cursor < clipped_end:
-                local_cursor = cursor.astimezone(LOCAL_TIMEZONE)
-                day = local_cursor.date()
-                next_midnight_local = datetime.combine(
-                    day + timedelta(days=1), time.min, tzinfo=LOCAL_TIMEZONE
-                )
-                segment_end = min(
-                    clipped_end, next_midnight_local.astimezone(timezone.utc)
-                )
-                milliseconds = round((segment_end - cursor).total_seconds() * 1000)
-                totals[user_id][day] += milliseconds
-                social_intervals[day].append((cursor, segment_end))
-                cursor = segment_end
-
-    per_friend = {
-        user_id: [(day, daily[day]) for day in days]
-        for user_id, daily in totals.items()
-    }
-    social: list[tuple[date, int]] = []
-    for day in days:
-        merged = 0
-        current_start: datetime | None = None
-        current_end: datetime | None = None
-        for interval_start, interval_end in sorted(social_intervals[day]):
-            if current_end is None or interval_start > current_end:
-                if current_start is not None and current_end is not None:
-                    merged += round((current_end - current_start).total_seconds() * 1000)
-                current_start, current_end = interval_start, interval_end
-            elif interval_end > current_end:
-                current_end = interval_end
-        if current_start is not None and current_end is not None:
-            merged += round((current_end - current_start).total_seconds() * 1000)
-        social.append((day, merged))
-    return per_friend, social
-
-
-def load_overview_daily_series(
-    database_path: Path, start_date: date, end_date: date
-) -> tuple[list[tuple[date, int]], list[tuple[date, int]]]:
-    per_friend, social = load_local_daily_series(database_path, start_date, end_date)
-    person_time = []
-    for index, day in enumerate(
-        start_date + timedelta(days=offset)
-        for offset in range((end_date - start_date).days + 1)
-    ):
-        person_time.append(
-            (day, sum(series[index][1] for series in per_friend.values()))
-        )
-    return person_time, social
-
-
-def load_rankings(
-    database_path: Path,
-    start_date: date,
-    end_date: date,
-    friend_search: str = "",
-    minimum_minutes: int = 0,
-    result_limit: int | None = 50,
-) -> tuple[
-    list[sqlite3.Row], int, str, int, list[tuple[date, int]], list[tuple[date, int]]
-]:
-    if end_date < start_date:
-        raise ValueError("The end date must be on or after the start date.")
-
-    range_start, range_end = local_range_utc(start_date, end_date)
-    start_at = sqlite_timestamp(range_start)
-    end_exclusive = sqlite_timestamp(range_end)
-
-    with open_database(database_path) as connection:
-        friend_table = find_friend_table(connection)
-        friend_count = connection.execute(
-            f"SELECT COUNT(*) FROM {quote_identifier(friend_table)}"
-        ).fetchone()[0]
-        latest_at = connection.execute(
-            "SELECT MAX(created_at) FROM gamelog_join_leave"
-        ).fetchone()[0]
-
-        # created_at is the end of an encounter and time is its duration in ms.
-        # MIN/MAX clip every encounter to the requested date interval.
-        query = f"""
-            WITH rankings AS (
-                SELECT
-                    f.user_id,
-                    f.display_name,
-                    COUNT(*) AS visits,
-                    CAST(ROUND(SUM(MAX(0.0,
-                        (MIN(julianday(j.created_at), julianday(:end_at)) -
-                         MAX(julianday(j.created_at) - (j.time / 86400000.0),
-                             julianday(:start_at))) * 86400000.0
-                    ))) AS INTEGER) AS milliseconds
-                FROM gamelog_join_leave AS j
-                JOIN {quote_identifier(friend_table)} AS f ON f.user_id = j.user_id
-                WHERE j.type = 'OnPlayerLeft'
-                  AND j.time > 0
-                  AND julianday(j.created_at) > julianday(:start_at)
-                  AND julianday(j.created_at) - (j.time / 86400000.0)
-                        < julianday(:end_at)
-                GROUP BY f.user_id, f.display_name
-            )
-            SELECT user_id, display_name, visits, milliseconds
-            FROM rankings
-            WHERE milliseconds > 0
-              AND milliseconds >= :minimum_ms
-              AND display_name LIKE :friend_search ESCAPE '\\'
-            ORDER BY milliseconds DESC, display_name COLLATE NOCASE
-        """
-        search_pattern = (
-            "%"
-            + friend_search.strip()
-            .replace("\\", "\\\\")
-            .replace("%", "\\%")
-            .replace("_", "\\_")
-            + "%"
-        )
-        all_rows = list(
-            connection.execute(
-                query,
-                {
-                    "start_at": start_at,
-                    "end_at": end_exclusive,
-                    "minimum_ms": max(0, minimum_minutes) * 60_000,
-                    "friend_search": search_pattern,
-                },
-            )
-        )
-        matching_count = len(all_rows)
-        rows = all_rows if result_limit is None else all_rows[:result_limit]
-    daily, social_daily = load_overview_daily_series(
-        database_path, start_date, end_date
-    )
-    return (
-        rows,
-        matching_count,
-        latest_at or "No activity",
-        friend_count,
-        daily,
-        social_daily,
-    )
-
-
-def load_friend_daily_series(
-    database_path: Path, start_date: date, end_date: date, user_id: str
-) -> list[tuple[date, int]]:
-    series, _social = load_local_daily_series(
-        database_path, start_date, end_date, [user_id]
-    )
-    return series[user_id]
-
-
-def load_friends_daily_series(
-    database_path: Path, start_date: date, end_date: date, user_ids: list[str]
-) -> dict[str, list[tuple[date, int]]]:
-    series, _social = load_local_daily_series(
-        database_path, start_date, end_date, user_ids
-    )
-    return series
-
-
-def load_social_daily_series(
-    database_path: Path, start_date: date, end_date: date
-) -> list[tuple[date, int]]:
-    _per_friend, social = load_local_daily_series(
-        database_path, start_date, end_date
-    )
-    return social
-
-
-def aggregate_time_series(
-    daily: list[tuple[date, int]], granularity: str
-) -> list[tuple[date, int]]:
-    """Aggregate daily points while preserving a chronological series."""
-    if granularity == "Daily":
-        return daily
-    totals: dict[date, int] = {}
-    for day, milliseconds in daily:
-        if granularity == "Weekly":
-            bucket = day - timedelta(days=day.weekday())
-        else:
-            bucket = day.replace(day=1)
-        totals[bucket] = totals.get(bucket, 0) + milliseconds
-    return list(totals.items())
-
-
-def format_duration(milliseconds: int) -> str:
-    total_minutes = int(round(milliseconds / 60_000))
-    hours, minutes = divmod(total_minutes, 60)
-    return f"{hours}h {minutes:02d}m"
-
-
-def find_database() -> Path:
-    candidates = [Path(__file__).resolve().with_name(DB_NAME)]
-    if os.environ.get("APPDATA"):
-        candidates.append(Path(os.environ["APPDATA"]) / "VRCX" / DB_NAME)
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate.resolve()
-    raise FileNotFoundError(
-        f"Could not find {DB_NAME}.\n\nSearched:\n"
-        + "\n".join(str(path) for path in candidates)
-    )
 
 
 class CalendarPopup(tk.Toplevel):
@@ -527,18 +228,19 @@ class MetricCard(tk.Frame):
         tk.Frame(self, bg=accent, height=3).pack(fill="x")
         tk.Label(
             self, text=title.upper(), bg=PANEL, fg=MUTED,
-            font=("Segoe UI Semibold", 8),
+            font=FONT_LABEL,
         ).pack(anchor="w", padx=13, pady=(9, 0))
         self.value = tk.Label(
             self, text="—", bg=PANEL, fg=TEXT,
-            font=("Segoe UI Semibold", 17),
+            font=FONT_METRIC,
         )
         self.value.pack(anchor="w", padx=13, pady=(2, 0))
         self.detail = tk.Label(self, text="", bg=PANEL, fg=MUTED, font=("Segoe UI", 8))
         self.detail.pack(anchor="w", padx=13, pady=(0, 9))
 
     def set(self, value: str, detail: str) -> None:
-        self.value.configure(text=value)
+        value_font = ("Segoe UI Semibold", 13) if len(value) > 18 else FONT_METRIC
+        self.value.configure(text=value, font=value_font)
         self.detail.configure(text=detail)
 
 
@@ -551,9 +253,17 @@ class TimeSeriesChart(tk.Canvas):
         self.series: list[tuple[date, int]] = []
         self.granularity = "Daily"
         self.metric_label = "Time with friends"
-        self.bind("<Configure>", lambda _event: self.redraw())
+        self._view_start = 0.0
+        self._view_end = 1.0
+        self._drag_origin: tuple[int, float, float] | None = None
+        self._resize_job: str | None = None
+        self.bind("<Configure>", self._schedule_redraw)
         self.bind("<Motion>", self._hover)
         self.bind("<Leave>", lambda _event: self.delete("hover"))
+        self.bind("<MouseWheel>", self._zoom)
+        self.bind("<ButtonPress-1>", self._start_pan)
+        self.bind("<B1-Motion>", self._pan)
+        self.bind("<Double-Button-1>", lambda _event: self.reset_zoom())
 
     def set_series(
         self,
@@ -565,6 +275,62 @@ class TimeSeriesChart(tk.Canvas):
         self.series = series_list[0][1] if series_list else []
         self.granularity = granularity
         self.metric_label = metric_label
+        self._view_start = 0.0
+        self._view_end = 1.0
+        self.redraw()
+
+    def _schedule_redraw(self, _event: tk.Event | None = None) -> None:
+        if self._resize_job is not None:
+            self.after_cancel(self._resize_job)
+        self._resize_job = self.after(45, self.redraw)
+
+    def reset_zoom(self) -> None:
+        self._view_start = 0.0
+        self._view_end = 1.0
+        self.redraw()
+
+    def _visible_series(
+        self,
+    ) -> list[tuple[str, list[tuple[date, int]], str]]:
+        if not self.series_list or not self.series:
+            return []
+        count = len(self.series)
+        first = max(0, min(count - 1, round(self._view_start * (count - 1))))
+        last = max(first + 1, min(count, round(self._view_end * (count - 1)) + 1))
+        return [
+            (name, series[first:last], color)
+            for name, series, color in self.series_list
+        ]
+
+    def _zoom(self, event: tk.Event) -> str:
+        if len(self.series) < 3:
+            return "break"
+        left, right = 55, self.winfo_width() - 17
+        if right <= left:
+            return "break"
+        cursor = max(0.0, min(1.0, (event.x - left) / (right - left)))
+        span = self._view_end - self._view_start
+        factor = 0.78 if event.delta > 0 else 1.28
+        new_span = max(2 / max(2, len(self.series) - 1), min(1.0, span * factor))
+        absolute = self._view_start + cursor * span
+        start = absolute - cursor * new_span
+        start = max(0.0, min(1.0 - new_span, start))
+        self._view_start, self._view_end = start, start + new_span
+        self.redraw()
+        return "break"
+
+    def _start_pan(self, event: tk.Event) -> None:
+        self._drag_origin = (event.x, self._view_start, self._view_end)
+
+    def _pan(self, event: tk.Event) -> None:
+        if self._drag_origin is None or self._view_end - self._view_start >= 0.999:
+            return
+        width = max(1, self.winfo_width() - 72)
+        origin_x, origin_start, origin_end = self._drag_origin
+        span = origin_end - origin_start
+        shift = -(event.x - origin_x) / width * span
+        start = max(0.0, min(1.0 - span, origin_start + shift))
+        self._view_start, self._view_end = start, start + span
         self.redraw()
 
     @staticmethod
@@ -573,6 +339,7 @@ class TimeSeriesChart(tk.Canvas):
         return f"{hours:.0f}h" if hours >= 10 else f"{hours:.1f}h"
 
     def redraw(self) -> None:
+        self._resize_job = None
         self.delete("all")
         width, height = self.winfo_width(), self.winfo_height()
         if width < 200 or height < 130:
@@ -590,15 +357,16 @@ class TimeSeriesChart(tk.Canvas):
             anchor="ne", font=("Segoe UI", 8),
         )
         left, top, right, bottom = 55, 61, width - 17, height - 30
-        if not self.series_list or not self.series:
+        visible_series = self._visible_series()
+        if not visible_series:
             self.create_text(width / 2, height / 2, text="No activity", fill=MUTED)
             return
         legend_x = left
-        for index, (name, _series, color) in enumerate(self.series_list):
+        for index, (name, _series, color) in enumerate(visible_series):
             label = name if len(name) <= 15 else name[:14] + "…"
             needed = 18 + len(label) * 6
             if legend_x + needed > right:
-                remaining = len(self.series_list) - index
+                remaining = len(visible_series) - index
                 self.create_text(
                     legend_x, 40, text=f"+{remaining} more", fill=MUTED,
                     anchor="w", font=("Segoe UI", 8),
@@ -615,7 +383,7 @@ class TimeSeriesChart(tk.Canvas):
 
         maximum = max(
             value
-            for _name, series, _color in self.series_list
+            for _name, series, _color in visible_series
             for _day, value in series
         )
         scale = maximum * 1.1 if maximum else 3_600_000
@@ -624,15 +392,16 @@ class TimeSeriesChart(tk.Canvas):
             value = scale * (1 - index / 3)
             self.create_line(left, y, right, y, fill=GRID)
             self.create_text(left - 7, y, text=self._axis_label(value), fill=MUTED, anchor="e", font=("Segoe UI", 8))
-        count = len(self.series)
-        for series_index, (_name, series, color) in enumerate(self.series_list):
+        primary_series = visible_series[0][1]
+        count = len(primary_series)
+        for series_index, (_name, series, color) in enumerate(visible_series):
             points: list[float] = []
             for index, (_day, value) in enumerate(series):
                 x = left if count == 1 else left + (right - left) * index / (count - 1)
                 y = bottom - (bottom - top) * value / scale
                 points += [x, y]
             if count > 1:
-                if len(self.series_list) == 1:
+                if len(visible_series) == 1:
                     self.create_polygon(
                         left, bottom, *points, right, bottom,
                         fill="#282451", outline="",
@@ -648,19 +417,21 @@ class TimeSeriesChart(tk.Canvas):
         for index in sorted({0, count // 2, count - 1}):
             x = left if count == 1 else left + (right - left) * index / (count - 1)
             axis_format = "%b %Y" if self.granularity == "Monthly" else "%d %b"
-            self.create_text(x, bottom + 10, text=self.series[index][0].strftime(axis_format), fill=MUTED, anchor="n", font=("Segoe UI", 8))
+            self.create_text(x, bottom + 10, text=primary_series[index][0].strftime(axis_format), fill=MUTED, anchor="n", font=("Segoe UI", 8))
 
     def _hover(self, event: tk.Event) -> None:
         self.delete("hover")
-        if not self.series:
+        visible_series = self._visible_series()
+        if not visible_series:
             return
         left, right = 55, self.winfo_width() - 17
         if not left <= event.x <= right:
             return
-        count = len(self.series)
+        primary_series = visible_series[0][1]
+        count = len(primary_series)
         index = 0 if count == 1 else round((event.x - left) * (count - 1) / (right - left))
         index = max(0, min(count - 1, index))
-        day, _value = self.series[index]
+        day, _value = primary_series[index]
         x = left if count == 1 else left + (right - left) * index / (count - 1)
         if self.granularity == "Weekly":
             period = f"Week of {day:%d %b %Y}"
@@ -670,7 +441,7 @@ class TimeSeriesChart(tk.Canvas):
             period = f"{day:%a, %d %b %Y}"
         values = [
             (name, series[index][1], color)
-            for name, series, color in self.series_list
+            for name, series, color in visible_series
         ]
         longest = max([len(period)] + [len(name) + 12 for name, _value, _color in values])
         box_width = max(205, min(310, longest * 6 + 24))
@@ -690,7 +461,7 @@ class TimeSeriesChart(tk.Canvas):
             y = box_y + 27 + row * 17
             self.create_oval(box_x + 9, y, box_x + 16, y + 7, fill=color, outline="", tags="hover")
             self.create_text(
-                box_x + 21, y + 3, text=f"{name}: {format_duration(value)}",
+                box_x + 21, y + 3, text=f"{name}: {format_duration_modern(value)}",
                 fill=TEXT, anchor="w", font=("Segoe UI", 8), tags="hover",
             )
 
@@ -699,6 +470,17 @@ class TopFriendsApp(tk.Tk):
     def __init__(self, database_path: Path) -> None:
         super().__init__()
         self.database_path = database_path
+        today = date.today()
+        self.repository = VrcxRepository(database_path)
+        self.state = AppState(today - timedelta(days=29), today)
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vrcx-data")
+        self._dashboard_future: Future[DashboardData] | None = None
+        self._comparison_future: Future[ComparisonData] | None = None
+        self._request_generation = 0
+        self._dashboard_data: DashboardData | None = None
+        self._visible_friends: list[FriendStat] = []
+        self._sort_column = "milliseconds"
+        self._sort_reverse = True
         self._refresh_job: str | None = None
         self._selected_user_ids: list[str] = []
         self._selected_friend_names: dict[str, str] = {}
@@ -709,12 +491,21 @@ class TopFriendsApp(tk.Tk):
         self._series_range: tuple[date, date] | None = None
         self._suppress_selection_event = False
         self.title(APP_TITLE)
-        self.geometry("1080x860")
+        window_width = min(1240, max(960, self.winfo_screenwidth() - 120))
+        window_height = min(900, max(760, self.winfo_screenheight() - 120))
+        window_x = max(0, (self.winfo_screenwidth() - window_width) // 2)
+        window_y = max(0, (self.winfo_screenheight() - window_height) // 2)
+        self.geometry(f"{window_width}x{window_height}+{window_x}+{window_y}")
         self.minsize(960, 760)
         self.configure(bg=BG)
         self._configure_styles()
         self._build_ui()
+        self.protocol("WM_DELETE_WINDOW", self.close)
         self.after(100, self.refresh)
+
+    def close(self) -> None:
+        self._executor.shutdown(wait=False, cancel_futures=True)
+        self.destroy()
 
     def _configure_styles(self) -> None:
         style = ttk.Style(self)
@@ -761,6 +552,14 @@ class TopFriendsApp(tk.Tk):
             selectbackground=[("readonly", PANEL_ALT)],
             selectforeground=[("readonly", TEXT)],
         )
+        style.configure(
+            "Dashboard.Horizontal.TProgressbar",
+            troughcolor=PANEL_ALT,
+            background=ACCENT,
+            bordercolor=BG,
+            lightcolor=ACCENT,
+            darkcolor=ACCENT,
+        )
 
     def _build_ui(self) -> None:
         container = tk.Frame(self, bg=BG)
@@ -796,10 +595,10 @@ class TopFriendsApp(tk.Tk):
         self.end_field = DateField(inner, "End date", today)
         self.end_field.pack(side="left")
 
-        tk.Button(
+        self.refresh_button = tk.Button(
             inner,
             text="Refresh dashboard",
-            command=self.refresh,
+            command=lambda: self.refresh(force=True),
             bg=ACCENT,
             fg="white",
             activebackground=ACCENT_HOVER,
@@ -810,7 +609,8 @@ class TopFriendsApp(tk.Tk):
             pady=9,
             cursor="hand2",
             font=("Segoe UI Semibold", 10),
-        ).pack(side="right", pady=(18, 0))
+        )
+        self.refresh_button.pack(side="right", pady=(18, 0))
 
         tk.Frame(controls, bg=BORDER, height=1).pack(fill="x")
         filters = tk.Frame(controls, bg=PANEL)
@@ -907,8 +707,6 @@ class TopFriendsApp(tk.Tk):
         for label, days in (
             ("Today", 1),
             ("7 days", 7),
-            ("14 days", 14),
-            ("3 weeks", 21),
             ("30 days", 30),
             ("90 days", 90),
         ):
@@ -926,6 +724,26 @@ class TopFriendsApp(tk.Tk):
                 pady=5,
                 cursor="hand2",
                 font=("Segoe UI", 9),
+            ).pack(side="left", padx=(0, 7))
+        for label, period in (
+            ("This month", "this_month"),
+            ("Last month", "last_month"),
+            ("This year", "this_year"),
+        ):
+            tk.Button(
+                presets,
+                text=label,
+                command=lambda value=period: self.set_calendar_range(value),
+                bg=PANEL_ALT,
+                fg=TEXT,
+                activebackground=ACCENT,
+                activeforeground="white",
+                relief="flat",
+                bd=0,
+                padx=12,
+                pady=5,
+                cursor="hand2",
+                font=FONT_SMALL,
             ).pack(side="left", padx=(0, 7))
         tk.Button(
             presets,
@@ -945,10 +763,10 @@ class TopFriendsApp(tk.Tk):
 
         metrics = tk.Frame(container, bg=BG)
         metrics.pack(fill="x", pady=(0, 12))
-        self.total_card = MetricCard(metrics, "Total person-time", ACCENT)
-        self.average_card = MetricCard(metrics, "Daily average", "#58a6ff")
-        self.peak_card = MetricCard(metrics, "Peak day", SUCCESS)
-        self.low_card = MetricCard(metrics, "Quietest day", WARNING)
+        self.total_card = MetricCard(metrics, "Social time", ACCENT)
+        self.average_card = MetricCard(metrics, "Friends in range", "#58a6ff")
+        self.peak_card = MetricCard(metrics, "Most social day", SUCCESS)
+        self.low_card = MetricCard(metrics, "Top friend", WARNING)
         cards = (self.total_card, self.average_card, self.peak_card, self.low_card)
         for index, card in enumerate(cards):
             card.grid(
@@ -984,27 +802,77 @@ class TopFriendsApp(tk.Tk):
             font=("Segoe UI", 9),
         )
         self.ranking_summary.pack(side="right")
+        self.selection_summary = tk.Label(
+            table_frame,
+            text="Select a friend for details · Ctrl-click to compare",
+            bg=PANEL_ALT,
+            fg=MUTED,
+            anchor="w",
+            padx=12,
+            pady=7,
+            font=FONT_SMALL,
+        )
+        self.selection_summary.pack(fill="x", padx=1)
         self.tree = ttk.Treeview(
             table_frame,
-            columns=("rank", "friend", "duration", "visits"),
+            columns=(
+                "rank", "friend", "duration", "sessions", "average",
+                "longest", "active_days", "last_seen",
+            ),
             show="headings",
             style="Friends.Treeview",
             selectmode="extended",
         )
         self.tree.heading("rank", text="#", anchor="center")
-        self.tree.heading("friend", text="FRIEND", anchor="w")
-        self.tree.heading("duration", text="TIME TOGETHER", anchor="e")
-        self.tree.heading("visits", text="SHARED SESSIONS", anchor="e")
+        self.tree.heading(
+            "friend", text="FRIEND", anchor="w",
+            command=lambda: self.sort_friends("display_name"),
+        )
+        self.tree.heading(
+            "duration", text="TIME TOGETHER", anchor="e",
+            command=lambda: self.sort_friends("milliseconds"),
+        )
+        self.tree.heading(
+            "sessions", text="SESSIONS", anchor="e",
+            command=lambda: self.sort_friends("sessions"),
+        )
+        self.tree.heading(
+            "average", text="AVERAGE", anchor="e",
+            command=lambda: self.sort_friends("average_milliseconds"),
+        )
+        self.tree.heading(
+            "longest", text="LONGEST", anchor="e",
+            command=lambda: self.sort_friends("longest_milliseconds"),
+        )
+        self.tree.heading(
+            "active_days", text="ACTIVE DAYS", anchor="e",
+            command=lambda: self.sort_friends("active_days"),
+        )
+        self.tree.heading(
+            "last_seen", text="LAST SEEN", anchor="e",
+            command=lambda: self.sort_friends("last_seen"),
+        )
         self.tree.column("rank", width=55, minwidth=45, stretch=False, anchor="center")
-        self.tree.column("friend", width=410, minwidth=180, anchor="w")
-        self.tree.column("duration", width=170, minwidth=130, anchor="e")
-        self.tree.column("visits", width=130, minwidth=105, stretch=False, anchor="e")
+        self.tree.column("friend", width=220, minwidth=160, anchor="w")
+        self.tree.column("duration", width=125, minwidth=105, anchor="e")
+        self.tree.column("sessions", width=90, minwidth=80, anchor="e")
+        self.tree.column("average", width=100, minwidth=85, anchor="e")
+        self.tree.column("longest", width=100, minwidth=85, anchor="e")
+        self.tree.column("active_days", width=95, minwidth=85, anchor="e")
+        self.tree.column("last_seen", width=115, minwidth=100, anchor="e")
         table_scrollbar = ttk.Scrollbar(
             table_frame, orient="vertical", command=self.tree.yview
         )
-        self.tree.configure(yscrollcommand=table_scrollbar.set)
+        table_horizontal = ttk.Scrollbar(
+            table_frame, orient="horizontal", command=self.tree.xview
+        )
+        self.tree.configure(
+            yscrollcommand=table_scrollbar.set,
+            xscrollcommand=table_horizontal.set,
+        )
         self.tree.bind("<<TreeviewSelect>>", self.show_selected_friends)
         table_scrollbar.pack(side="right", fill="y", padx=(0, 1), pady=(0, 1))
+        table_horizontal.pack(side="bottom", fill="x", padx=1, pady=(0, 1))
         self.tree.pack(fill="both", expand=True, padx=(1, 0), pady=(0, 1))
         self.empty_state = tk.Label(
             table_frame,
@@ -1081,6 +949,34 @@ class TopFriendsApp(tk.Tk):
             state="disabled",
         )
         self.overview_button.pack(side="right", padx=(0, 8))
+        self.comparison_mode_variable = tk.StringVar(value="Period total")
+        self.comparison_mode_box = ttk.Combobox(
+            series_controls,
+            textvariable=self.comparison_mode_variable,
+            values=("Period total", "Cumulative"),
+            state="disabled",
+            width=12,
+            style="Filter.TCombobox",
+        )
+        self.comparison_mode_box.pack(side="left", padx=(8, 0))
+        self.comparison_mode_box.bind(
+            "<<ComboboxSelected>>", lambda _event: self.render_time_series()
+        )
+        tk.Button(
+            series_controls,
+            text="Reset zoom",
+            command=lambda: self.chart.reset_zoom(),
+            bg=PANEL,
+            fg=MUTED,
+            activebackground=PANEL_ALT,
+            activeforeground=TEXT,
+            relief="flat",
+            bd=0,
+            padx=8,
+            pady=6,
+            cursor="hand2",
+            font=FONT_SMALL,
+        ).pack(side="left")
         self.chart = TimeSeriesChart(chart_frame)
         self.chart.pack(fill="both", expand=True, padx=1, pady=1)
 
@@ -1090,6 +986,12 @@ class TopFriendsApp(tk.Tk):
             footer, text="Loading…", bg=BG, fg=MUTED, font=("Segoe UI", 9)
         )
         self.status.pack(side="left")
+        self.loading_bar = ttk.Progressbar(
+            footer,
+            mode="indeterminate",
+            length=90,
+            style="Dashboard.Horizontal.TProgressbar",
+        )
         tk.Label(
             footer,
             text=f"Dates use local time · {LOCAL_TIMEZONE_NAME}",
@@ -1099,11 +1001,26 @@ class TopFriendsApp(tk.Tk):
         ).pack(side="right")
 
         self.bind("<Return>", lambda _event: self.refresh())
-        self.bind("<F5>", lambda _event: self.refresh())
+        self.bind("<F5>", lambda _event: self.refresh(force=True))
+        self.bind("<Control-f>", lambda _event: self.search_entry.focus_set())
+        self.bind("<Escape>", lambda _event: self.clear_filters())
 
     def set_range(self, days: int) -> None:
         end = date.today()
         self.start_field.set(end - timedelta(days=days - 1))
+        self.end_field.set(end)
+        self.refresh()
+
+    def set_calendar_range(self, period: str) -> None:
+        today = date.today()
+        if period == "this_month":
+            start, end = today.replace(day=1), today
+        elif period == "last_month":
+            end = today.replace(day=1) - timedelta(days=1)
+            start = end.replace(day=1)
+        else:
+            start, end = today.replace(month=1, day=1), today
+        self.start_field.set(start)
         self.end_field.set(end)
         self.refresh()
 
@@ -1142,16 +1059,23 @@ class TopFriendsApp(tk.Tk):
     def render_time_series(self) -> None:
         granularity = self.granularity_variable.get()
         if self._selected_user_ids:
+            colors = self.assign_series_colors(self._selected_user_ids)
             series_list = [
                 (
                     self._selected_friend_names.get(user_id, "Friend"),
-                    aggregate_time_series(self._friend_series[user_id], granularity),
-                    SERIES_COLORS[index % len(SERIES_COLORS)],
+                    self.prepare_comparison_series(
+                        self._friend_series[user_id], granularity
+                    ),
+                    colors[user_id],
                 )
-                for index, user_id in enumerate(self._selected_user_ids)
+                for user_id in self._selected_user_ids
                 if user_id in self._friend_series
             ]
-            metric_label = "Time together"
+            metric_label = (
+                "Cumulative time together"
+                if self.comparison_mode_variable.get() == "Cumulative"
+                else "Time together"
+            )
             count = len(series_list)
             context = (
                 f"Comparing {count} friend{'s' if count != 1 else ''} · "
@@ -1162,25 +1086,58 @@ class TopFriendsApp(tk.Tk):
             series_list = [
                 (
                     "All current friends",
-                    aggregate_time_series(self._raw_series, granularity),
+                    aggregate_series(self._raw_series, granularity),
                     ACCENT_HOVER,
                 )
             ]
             metric_label = "Person-time"
-            context = f"Total person-time · {format_duration(total)} · overlaps count per friend"
+            context = f"Total person-time · {format_duration_modern(total)} · overlaps count per friend"
         else:
             total = sum(value for _day, value in self._raw_series)
             series_list = [
                 (
                     "All current friends",
-                    aggregate_time_series(self._raw_series, granularity),
+                    aggregate_series(self._raw_series, granularity),
                     ACCENT_HOVER,
                 )
             ]
             metric_label = "Time with friends"
-            context = f"Social time · {format_duration(total)} · overlaps counted once"
+            context = f"Social time · {format_duration_modern(total)} · overlaps counted once"
         self.series_context.configure(text=context)
         self.chart.set_series(series_list, granularity, metric_label)
+
+    def prepare_comparison_series(
+        self, daily: list[tuple[date, int]], granularity: str
+    ) -> list[tuple[date, int]]:
+        series = aggregate_series(daily, granularity)
+        if self.comparison_mode_variable.get() != "Cumulative":
+            return series
+        running = 0
+        cumulative = []
+        for day, value in series:
+            running += value
+            cumulative.append((day, running))
+        return cumulative
+
+    @staticmethod
+    def series_color(user_id: str) -> str:
+        digest = hashlib.blake2b(user_id.encode("utf-8"), digest_size=2).digest()
+        return SERIES_COLORS[int.from_bytes(digest, "big") % len(SERIES_COLORS)]
+
+    @classmethod
+    def assign_series_colors(cls, user_ids: list[str]) -> dict[str, str]:
+        assigned: dict[str, str] = {}
+        used: set[int] = set()
+        for user_id in sorted(user_ids):
+            preferred = SERIES_COLORS.index(cls.series_color(user_id))
+            index = preferred
+            for _attempt in range(len(SERIES_COLORS)):
+                if index not in used:
+                    break
+                index = (index + 1) % len(SERIES_COLORS)
+            assigned[user_id] = SERIES_COLORS[index]
+            used.add(index)
+        return assigned
 
     def show_overview_series(self) -> None:
         self._selected_user_ids = []
@@ -1199,6 +1156,10 @@ class TopFriendsApp(tk.Tk):
             self._suppress_selection_event = False
         self.overview_button.configure(state="disabled")
         self.metric_box.configure(state="readonly")
+        self.comparison_mode_box.configure(state="disabled")
+        self.selection_summary.configure(
+            text="Select a friend for details · Ctrl-click to compare"
+        )
         self.render_time_series()
 
     def show_selected_friends(self, _event: tk.Event | None = None) -> None:
@@ -1214,117 +1175,252 @@ class TopFriendsApp(tk.Tk):
             if len(self.tree.item(user_id, "values")) >= 2
         }
         selection = [user_id for user_id in selection if user_id in friend_names]
-        try:
-            start = self.start_field.get()
-            end = self.end_field.get()
-            if self._selected_user_ids == selection and self._series_range == (start, end):
-                return
-            series = load_friends_daily_series(
-                self.database_path, start, end, selection
-            )
-        except (ValueError, RuntimeError, sqlite3.Error, OSError) as error:
-            messagebox.showerror(APP_TITLE, str(error), parent=self)
-            return
         self._selected_user_ids = selection
         self._selected_friend_names = friend_names
-        self._series_range = (start, end)
-        self._friend_series = series
+        selected_stats = [
+            friend for friend in self._visible_friends if friend.user_id in selection
+        ]
+        if len(selected_stats) == 1:
+            friend = selected_stats[0]
+            self.selection_summary.configure(
+                text=(
+                    f"{friend.display_name}  ·  {format_duration_modern(friend.milliseconds)} total  ·  "
+                    f"{friend.sessions} sessions  ·  {format_duration_modern(friend.average_milliseconds)} average  ·  "
+                    f"{format_duration_modern(friend.longest_milliseconds)} longest  ·  "
+                    f"last seen {format_local_datetime(friend.last_seen)}"
+                )
+            )
+        else:
+            self.selection_summary.configure(
+                text=f"Comparing {len(selected_stats)} friends across the selected date range"
+            )
+        self.state.selected_friend_ids = selection
         self.overview_button.configure(state="normal")
         self.metric_box.configure(state="disabled")
+        self.comparison_mode_box.configure(state="readonly")
+        comparison_state = self.collect_state()
+        comparison_state.selected_friend_ids = selection
+        self._comparison_future = self._executor.submit(
+            self.repository.load_comparison, comparison_state
+        )
+        self.status.configure(
+            text=f"Loading comparison for {len(selection)} friend{'s' if len(selection) != 1 else ''}…"
+        )
+        self.after(40, self.poll_comparison, self._comparison_future, comparison_state)
+
+    def poll_comparison(
+        self, future: Future[ComparisonData], comparison_state: AppState
+    ) -> None:
+        if future is not self._comparison_future:
+            return
+        if not future.done():
+            self.after(40, self.poll_comparison, future, comparison_state)
+            return
+        try:
+            result = future.result()
+        except (VrcxDataError, ValueError, sqlite3.Error, OSError) as error:
+            logging.exception("Comparison query failed")
+            self.status.configure(text="Could not load the selected comparison.")
+            messagebox.showerror(APP_TITLE, str(error), parent=self)
+            return
+        self._friend_series = {
+            user_id: list(series)
+            for user_id, series in result.series_by_user.items()
+        }
+        self._series_range = (comparison_state.start_date, comparison_state.end_date)
         self.render_time_series()
+        self.status.configure(
+            text=f"Comparing {len(self._friend_series)} friends · {LOCAL_TIMEZONE_NAME}"
+        )
 
     def set_all_time(self) -> None:
         try:
-            with open_database(self.database_path) as connection:
-                earliest_at = connection.execute(
-                    "SELECT MIN(created_at) FROM gamelog_join_leave"
-                ).fetchone()[0]
-            if not earliest_at:
-                raise RuntimeError("No activity was found in the database.")
-            earliest_local = datetime.fromisoformat(
-                earliest_at.replace("Z", "+00:00")
-            ).astimezone(LOCAL_TIMEZONE)
-            self.start_field.set(earliest_local.date())
+            self.start_field.set(self.repository.earliest_local_date())
             self.end_field.set(date.today())
             self.refresh()
-        except (ValueError, RuntimeError, sqlite3.Error, OSError) as error:
+        except (VrcxDataError, ValueError, sqlite3.Error, OSError) as error:
             messagebox.showerror(APP_TITLE, str(error), parent=self)
 
-    def refresh(self) -> None:
+    def collect_state(self) -> AppState:
+        minimum_minutes, result_limit = self.ranking_filters()
+        return AppState(
+            start_date=self.start_field.get(),
+            end_date=self.end_field.get(),
+            search_term=self.search_variable.get(),
+            minimum_minutes=minimum_minutes,
+            result_limit=result_limit,
+            selected_friend_ids=list(self._selected_user_ids),
+            aggregation=self.granularity_variable.get(),
+            overview_metric=self.metric_variable.get(),
+        )
+
+    def set_loading(self, loading: bool, message: str = "Loading activity…") -> None:
+        self.configure(cursor="watch" if loading else "")
+        self.refresh_button.configure(state="disabled" if loading else "normal")
+        if loading:
+            self.status.configure(text=message)
+            self.loading_bar.pack(side="left", padx=(10, 0))
+            self.loading_bar.start(12)
+        else:
+            self.loading_bar.stop()
+            self.loading_bar.pack_forget()
+
+    def refresh(self, force: bool = False) -> None:
         self._refresh_job = None
-        self.status.configure(text="Updating dashboard…")
-        self.update_idletasks()
         try:
-            start = self.start_field.get()
-            end = self.end_field.get()
-            minimum_minutes, result_limit = self.ranking_filters()
-            (
-                rows,
-                matching_count,
-                latest_at,
-                friend_count,
-                daily,
-                social_daily,
-            ) = load_rankings(
-                self.database_path,
-                start,
-                end,
-                friend_search=self.search_variable.get(),
-                minimum_minutes=minimum_minutes,
-                result_limit=result_limit,
-            )
-        except (ValueError, RuntimeError, sqlite3.Error, OSError) as error:
+            state = self.collect_state()
+        except ValueError as error:
             messagebox.showerror(APP_TITLE, str(error), parent=self)
             return
+        if force:
+            self.repository.invalidate()
+        self.state = state
+        self._request_generation += 1
+        generation = self._request_generation
+        if self._dashboard_future is not None and not self._dashboard_future.done():
+            self._dashboard_future.cancel()
+        self.set_loading(True)
+        self._dashboard_future = self._executor.submit(
+            self.repository.load_dashboard, state
+        )
+        self.after(40, self.poll_dashboard, self._dashboard_future, generation, state)
 
-        selected_user_ids = list(self._selected_user_ids)
+    def poll_dashboard(
+        self,
+        future: Future[DashboardData],
+        generation: int,
+        state: AppState,
+    ) -> None:
+        if generation != self._request_generation:
+            return
+        if not future.done():
+            self.after(40, self.poll_dashboard, future, generation, state)
+            return
+        try:
+            data = future.result()
+        except (VrcxDataError, ValueError, sqlite3.Error, OSError) as error:
+            logging.exception("Dashboard refresh failed")
+            self.set_loading(False)
+            self.status.configure(text="Could not refresh VRCX activity.")
+            messagebox.showerror(APP_TITLE, str(error), parent=self)
+            return
+        self._dashboard_data = data
+        self.render_dashboard(data, state)
+        self.set_loading(False)
+
+    def sort_friends(self, column: str) -> None:
+        if column == self._sort_column:
+            self._sort_reverse = not self._sort_reverse
+        else:
+            self._sort_column = column
+            self._sort_reverse = column != "display_name"
+        self.populate_friend_table(self._visible_friends)
+
+    def populate_friend_table(self, friends: list[FriendStat]) -> None:
+        selected = set(self._selected_user_ids)
+        if self._sort_column == "display_name":
+            key = lambda friend: friend.display_name.casefold()
+        elif self._sort_column == "last_seen":
+            key = lambda friend: (
+                friend.last_seen is not None,
+                friend.last_seen.timestamp() if friend.last_seen else 0,
+            )
+        else:
+            key = lambda friend: getattr(friend, self._sort_column)
+        ordered = sorted(friends, key=key, reverse=self._sort_reverse)
+
+        headings = {
+            "friend": "FRIEND",
+            "duration": "TIME TOGETHER",
+            "sessions": "SESSIONS",
+            "average": "AVERAGE",
+            "longest": "LONGEST",
+            "active_days": "ACTIVE DAYS",
+            "last_seen": "LAST SEEN",
+        }
+        attribute_to_column = {
+            "display_name": "friend",
+            "milliseconds": "duration",
+            "sessions": "sessions",
+            "average_milliseconds": "average",
+            "longest_milliseconds": "longest",
+            "active_days": "active_days",
+            "last_seen": "last_seen",
+        }
+        active_column = attribute_to_column.get(self._sort_column)
+        for column, label in headings.items():
+            arrow = " ▼" if self._sort_reverse else " ▲"
+            self.tree.heading(column, text=label + (arrow if column == active_column else ""))
+
         self._suppress_selection_event = True
         for item in self.tree.get_children():
             self.tree.delete(item)
-        for rank, row in enumerate(rows, start=1):
+        for rank, friend in enumerate(ordered, start=1):
             self.tree.insert(
                 "",
                 "end",
-                iid=row["user_id"],
+                iid=friend.user_id,
                 values=(
                     rank,
-                    row["display_name"],
-                    format_duration(row["milliseconds"]),
-                    row["visits"],
+                    friend.display_name,
+                    format_duration_modern(friend.milliseconds),
+                    friend.sessions,
+                    format_duration_modern(friend.average_milliseconds),
+                    format_duration_modern(friend.longest_milliseconds),
+                    friend.active_days,
+                    format_local_date(friend.last_seen),
                 ),
             )
+        visible_selection = [friend.user_id for friend in ordered if friend.user_id in selected]
+        if visible_selection:
+            self.tree.selection_set(visible_selection)
         self._suppress_selection_event = False
+
+    def render_dashboard(self, data: DashboardData, state: AppState) -> None:
+        selected_user_ids = list(self._selected_user_ids)
+        rows = list(data.friends)
+        self._visible_friends = rows
+        self.populate_friend_table(rows)
         if rows:
             self.empty_state.place_forget()
         else:
             self.empty_state.place(relx=0.5, rely=0.56, anchor="center")
             self.empty_state.lift()
 
-        if len(rows) < matching_count:
-            ranking_text = f"Showing {len(rows)} of {matching_count} · Ctrl-click to compare"
+        if len(rows) < data.matching_count:
+            ranking_text = f"Showing {len(rows)} of {data.matching_count} · Ctrl-click to compare"
         else:
             ranking_text = (
-                f"{matching_count} match{'es' if matching_count != 1 else ''}"
+                f"{data.matching_count} match{'es' if data.matching_count != 1 else ''}"
                 " · Ctrl-click to compare"
             )
         self.ranking_summary.configure(text=ranking_text)
 
-        total = sum(milliseconds for _day, milliseconds in daily)
-        average = round(total / max(1, len(daily)))
-        peak_day, peak_value = max(daily, key=lambda item: item[1]) if daily else (None, 0)
-        low_day, low_value = min(daily, key=lambda item: item[1]) if daily else (None, 0)
-        encounters = sum(row["visits"] for row in rows)
-        self.total_card.set(format_duration(total), "all current friends in range")
-        self.average_card.set(format_duration(average), f"across {len(daily)} calendar days")
+        social_daily = list(data.social_daily)
+        peak_day, peak_value = (
+            max(social_daily, key=lambda item: item[1])
+            if social_daily else (None, 0)
+        )
+        top_friend = rows[0] if rows else None
+        self.total_card.set(
+            format_duration_modern(data.total_social_milliseconds),
+            "wall-clock time with at least one friend",
+        )
+        self.average_card.set(
+            f"{data.matching_count}",
+            f"of {data.current_friend_count} current friends in range",
+        )
         self.peak_card.set(
-            format_duration(peak_value), peak_day.strftime("%a, %d %b %Y") if peak_day else "No data"
+            format_duration_modern(peak_value),
+            peak_day.strftime("%a, %d %b %Y") if peak_day else "No data",
         )
         self.low_card.set(
-            format_duration(low_value), low_day.strftime("%a, %d %b %Y") if low_day else "No data"
+            top_friend.display_name if top_friend else "—",
+            format_duration_modern(top_friend.milliseconds) if top_friend else "No activity",
         )
-        self._overview_daily = daily
+        self._overview_daily = list(data.person_daily)
         self._social_daily = social_daily
-        visible_ids = {row["user_id"] for row in rows}
+        visible_ids = {friend.user_id for friend in rows}
         visible_selection = [
             user_id for user_id in selected_user_ids if user_id in visible_ids
         ]
@@ -1338,22 +1434,16 @@ class TopFriendsApp(tk.Tk):
         else:
             self.show_overview_series()
 
-        if latest_at == "No activity":
-            latest_label = latest_at
-        else:
-            latest_local = datetime.fromisoformat(
-                latest_at.replace("Z", "+00:00")
-            ).astimezone(LOCAL_TIMEZONE)
-            latest_label = latest_local.strftime("%Y-%m-%d %H:%M")
+        latest_label = format_local_datetime(data.latest_activity)
         if rows:
             summary = (
-                f"{start:%d %b %Y} – {end:%d %b %Y} · "
-                f"{encounters:,} shared sessions in visible list · "
-                f"{friend_count} current friends · Latest data {latest_label}"
+                f"{state.start_date:%d %b %Y} – {state.end_date:%d %b %Y} · "
+                f"{data.visible_sessions:,} shared sessions in visible list · "
+                f"Latest data {latest_label}"
             )
-        elif matching_count == 0:
+        elif data.matching_count == 0:
             summary = (
-                f"No friends match · {friend_count} current friends · "
+                f"No friends match · {data.current_friend_count} current friends · "
                 f"Latest data {latest_label}"
             )
         else:
@@ -1363,33 +1453,38 @@ class TopFriendsApp(tk.Tk):
 
 def run_check(database_path: Path) -> int:
     end = date.today()
-    rows, matching_count, latest_at, friend_count, daily, social_daily = load_rankings(
-        database_path, end - timedelta(days=6), end
+    data = VrcxRepository(database_path).load_dashboard(
+        AppState(end - timedelta(days=6), end)
     )
-    total = sum(value for _day, value in daily)
-    social_total = sum(value for _day, value in social_daily)
+    total = data.total_person_milliseconds
+    social_total = data.total_social_milliseconds
     if social_total > total:
         raise RuntimeError("Social time cannot exceed total person-time.")
-    peak_day, peak_value = max(daily, key=lambda item: item[1])
+    peak_day, peak_value = max(data.social_daily, key=lambda item: item[1])
     print(
-        f"OK: {len(rows)} of {matching_count} friends shown, {friend_count} current friends, "
-        f"{len(daily)} daily points, {format_duration(social_total)} social time, "
-        f"{format_duration(total)} person-time, "
-        f"peak {peak_day} ({format_duration(peak_value)}), "
-        f"timezone {LOCAL_TIMEZONE_NAME}, latest activity {latest_at}"
+        f"OK: {len(data.friends)} of {data.matching_count} friends shown, "
+        f"{data.current_friend_count} current friends, {len(data.social_daily)} daily points, "
+        f"{format_duration_modern(social_total)} social time, "
+        f"{format_duration_modern(total)} person-time, "
+        f"peak {peak_day} ({format_duration_modern(peak_value)}), "
+        f"timezone {LOCAL_TIMEZONE_NAME}, "
+        f"latest activity {format_local_datetime(data.latest_activity)}"
     )
     return 0
 
 
 def main() -> int:
+    log_path = configure_logging()
+    logging.info("Starting VRCX Time Together")
     try:
-        database_path = find_database()
+        database_path = locate_database(Path(__file__))
     except FileNotFoundError as error:
         if "--check" in sys.argv:
             print(f"ERROR: {error}", file=sys.stderr)
         else:
             messagebox.showerror(APP_TITLE, str(error))
         return 1
+    logging.info("Using read-only VRCX database at %s", database_path)
     if "--check" in sys.argv:
         return run_check(database_path)
     app = TopFriendsApp(database_path)
