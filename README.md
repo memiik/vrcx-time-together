@@ -33,19 +33,20 @@ No Python installation is needed for the packaged application.
 1. Open the repository's **Actions** tab and select the completed
    **Windows build and release** run.
 2. Under **Artifacts**, download `VRCX-Time-Together-windows-x64`.
-3. Extract the downloaded artifact ZIP. It contains a portable application ZIP
-   and its `.sha256` checksum.
-4. Extract `VRCX-Time-Together-1.0.0-<commit>-windows-x64.zip` to a permanent
-   folder. Do not move the executable out of that folder because its
-   `_internal` directory is required.
-5. Double-click `VRCX Time Together.exe`.
+3. Extract the downloaded artifact ZIP. It contains both a standalone `.exe`
+   and a portable application ZIP, plus SHA-256 checksums for each.
+4. Either run `VRCX-Time-Together-1.0.0-<commit>-windows-x64.exe` directly, or
+   extract the portable ZIP to a permanent folder and run
+   `VRCX Time Together.exe`. Keep the portable build's `_internal` directory
+   beside its executable.
 
 The app automatically reads `%APPDATA%\VRCX\VRCX.sqlite3`. If VRCX is installed
 elsewhere or you keep a copied database, use **Change database** in the app and
 select its `VRCX.sqlite3` file. The database is always opened read-only.
 
-For tagged releases, download the Windows ZIP directly from the repository's
-**Releases** page, extract it once, and run `VRCX Time Together.exe`.
+For tagged releases, download either the standalone `.exe` or portable ZIP
+directly from the repository's **Releases** page. The standalone build is the
+easiest option; the portable build starts faster after extraction.
 
 ## Features
 
@@ -120,23 +121,23 @@ Windows releases are frozen with the committed PyInstaller specification and
 the exact dependency versions in `requirements-build.txt`. The result contains
 Python, Qt, PyQtGraph, and timezone data; users do not need Python installed.
 
-Build locally with Python 3.13.11:
+Build both packages locally with Python 3.13.11:
 
 ```powershell
 py -3.13 -m venv .venv-build
 .\.venv-build\Scripts\python.exe -m pip install -r .\requirements-build.txt
 .\.venv-build\Scripts\python.exe -m PyInstaller --noconfirm --clean .\packaging\windows\VRCX-Time-Together.spec
+.\.venv-build\Scripts\python.exe -m PyInstaller --noconfirm --clean .\packaging\windows\VRCX-Time-Together-OneFile.spec
 ```
 
-The executable is created at
-`dist\VRCX Time Together\VRCX Time Together.exe`. Distribute the entire
-`VRCX Time Together` folder, normally as a ZIP; the `_internal` directory is
-required beside the executable.
+The portable executable is created at
+`dist\VRCX Time Together\VRCX Time Together.exe`; its entire folder must be
+distributed together. The standalone build is created at
+`dist\VRCX Time Together Standalone.exe` and can be distributed by itself.
 
 The `Windows build and release` GitHub Actions workflow can also be run
-manually. Pushing a tag matching the application version builds and tests the
-portable package, creates a SHA-256 checksum, and publishes both files to a
-GitHub Release:
+manually. Pushing a tag matching the application version builds and tests both
+packages, creates SHA-256 checksums, and publishes them to a GitHub Release:
 
 ```powershell
 git tag v1.0.0

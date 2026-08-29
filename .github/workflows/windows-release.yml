@@ -47,10 +47,13 @@ jobs:
             throw "Tag $($env:GITHUB_REF_NAME) does not match application version $appVersion."
           }
 
-      - name: Build portable application
-        run: python -m PyInstaller --noconfirm --clean packaging/windows/VRCX-Time-Together.spec
+      - name: Build Windows packages
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean packaging/windows/VRCX-Time-Together.spec
+          python -m PyInstaller --noconfirm --clean packaging/windows/VRCX-Time-Together-OneFile.spec
 
-      - name: Smoke-test packaged executable
+      - name: Smoke-test packaged executables
         shell: pwsh
         run: |
           $appDirectory = Join-Path $PWD "dist\VRCX Time Together"
@@ -70,10 +73,25 @@ jobs:
           Remove-Item Env:QT_QPA_PLATFORM
           Remove-Item -LiteralPath $database
           if ($uiProcess.ExitCode -ne 0) {
-            throw "Packaged UI check failed with exit code $($uiProcess.ExitCode)."
+            throw "Portable UI check failed with exit code $($uiProcess.ExitCode)."
           }
 
-      - name: Create portable archive and checksum
+          $standalone = Join-Path $PWD "dist\VRCX Time Together Standalone.exe"
+          $standaloneDatabase = Join-Path $PWD "dist\VRCX.sqlite3"
+          python scripts/create_smoke_database.py $standaloneDatabase
+          $process = Start-Process -FilePath $standalone -ArgumentList "--check" -Wait -PassThru -WindowStyle Hidden
+          if ($process.ExitCode -ne 0) {
+            throw "Standalone executable check failed with exit code $($process.ExitCode)."
+          }
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $uiProcess = Start-Process -FilePath $standalone -ArgumentList "--ui-check" -Wait -PassThru -WindowStyle Hidden
+          Remove-Item Env:QT_QPA_PLATFORM
+          Remove-Item -LiteralPath $standaloneDatabase
+          if ($uiProcess.ExitCode -ne 0) {
+            throw "Standalone UI check failed with exit code $($uiProcess.ExitCode)."
+          }
+
+      - name: Create release assets and checksums
         shell: pwsh
         run: |
           $version = python -c "from vrc_time_together import __version__; print(__version__)"
@@ -89,6 +107,12 @@ jobs:
           Compress-Archive -Path "dist\VRCX Time Together\*" -DestinationPath $archive -CompressionLevel Optimal
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
           "$hash  $archiveName" | Set-Content -Encoding ascii -LiteralPath "$archive.sha256"
+
+          $standaloneName = "VRCX-Time-Together-$releaseVersion-windows-x64.exe"
+          $standalone = Join-Path $releaseDirectory $standaloneName
+          Copy-Item -LiteralPath "dist\VRCX Time Together Standalone.exe" -Destination $standalone
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $standalone).Hash.ToLowerInvariant()
+          "$hash  $standaloneName" | Set-Content -Encoding ascii -LiteralPath "$standalone.sha256"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
