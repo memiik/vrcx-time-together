@@ -1,0 +1,113 @@
+name: Windows build and release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Build Windows x64
+    runs-on: windows-2025
+    permissions:
+      contents: write
+    env:
+      PYTHONUTF8: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13.11"
+          architecture: x64
+          cache: pip
+          cache-dependency-path: requirements-build.txt
+
+      - name: Install pinned build dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements-build.txt
+
+      - name: Run domain tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Validate tagged version
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        run: |
+          $appVersion = python -c "from vrc_time_together import __version__; print(__version__)"
+          $tagVersion = $env:GITHUB_REF_NAME.TrimStart("v")
+          if ($tagVersion -ne $appVersion) {
+            throw "Tag $($env:GITHUB_REF_NAME) does not match application version $appVersion."
+          }
+
+      - name: Build portable application
+        run: python -m PyInstaller --noconfirm --clean packaging/windows/VRCX-Time-Together.spec
+
+      - name: Smoke-test packaged executable
+        shell: pwsh
+        run: |
+          $appDirectory = Join-Path $PWD "dist\VRCX Time Together"
+          $ambientIcu = Get-ChildItem -LiteralPath (Join-Path $appDirectory "_internal") -File -Filter "icu*.dll"
+          if ($ambientIcu) {
+            throw "An incompatible ambient ICU library was packaged: $($ambientIcu.Name -join ', ')"
+          }
+          $database = Join-Path $appDirectory "VRCX.sqlite3"
+          $executable = Join-Path $appDirectory "VRCX Time Together.exe"
+          python scripts/create_smoke_database.py $database
+          $process = Start-Process -FilePath $executable -ArgumentList "--check" -Wait -PassThru -WindowStyle Hidden
+          if ($process.ExitCode -ne 0) {
+            throw "Packaged executable check failed with exit code $($process.ExitCode)."
+          }
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $uiProcess = Start-Process -FilePath $executable -ArgumentList "--ui-check" -Wait -PassThru -WindowStyle Hidden
+          Remove-Item Env:QT_QPA_PLATFORM
+          Remove-Item -LiteralPath $database
+          if ($uiProcess.ExitCode -ne 0) {
+            throw "Packaged UI check failed with exit code $($uiProcess.ExitCode)."
+          }
+
+      - name: Create portable archive and checksum
+        shell: pwsh
+        run: |
+          $version = python -c "from vrc_time_together import __version__; print(__version__)"
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $releaseVersion = $env:GITHUB_REF_NAME.TrimStart("v")
+          } else {
+            $releaseVersion = "$version-$($env:GITHUB_SHA.Substring(0, 7))"
+          }
+          $releaseDirectory = Join-Path $PWD "release"
+          New-Item -ItemType Directory -Force -Path $releaseDirectory | Out-Null
+          $archiveName = "VRCX-Time-Together-$releaseVersion-windows-x64.zip"
+          $archive = Join-Path $releaseDirectory $archiveName
+          Compress-Archive -Path "dist\VRCX Time Together\*" -DestinationPath $archive -CompressionLevel Optimal
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+          "$hash  $archiveName" | Set-Content -Encoding ascii -LiteralPath "$archive.sha256"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: VRCX-Time-Together-windows-x64
+          path: release/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub release assets
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag release/* --clobber
+          } else {
+            gh release create $tag release/* --verify-tag --generate-notes --title "VRCX Time Together $tag"
+          }

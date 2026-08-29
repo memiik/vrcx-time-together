@@ -1380,7 +1380,7 @@ def run_check(database_path: Path) -> int:
     if data.total_social_milliseconds > data.total_person_milliseconds:
         raise RuntimeError("Social time cannot exceed total person-time.")
     peak_day, peak_value = max(data.social_daily, key=lambda item: item[1])
-    print(
+    message = (
         f"OK: {len(data.friends)} of {data.matching_count} friends shown, "
         f"{data.current_friend_count} current friends, {len(data.social_daily)} daily points, "
         f"{format_duration(data.total_social_milliseconds)} social time, "
@@ -1388,22 +1388,61 @@ def run_check(database_path: Path) -> int:
         f"peak {peak_day} ({format_duration(peak_value)}), timezone {LOCAL_TIMEZONE_NAME}, "
         f"latest activity {format_local_datetime(data.latest_activity)}"
     )
+    if sys.stdout is not None:
+        print(message)
+    else:
+        LOGGER.info(message)
     return 0
+
+
+def run_ui_check(app: QApplication, window: MainWindow) -> int:
+    """Exercise the frozen Qt shell and first background database load."""
+    poll = QTimer(window)
+    poll.setInterval(40)
+    timeout = QTimer(window)
+    timeout.setSingleShot(True)
+
+    def complete() -> None:
+        if window.dashboard is None:
+            return
+        LOGGER.info("Packaged UI check completed successfully")
+        poll.stop()
+        timeout.stop()
+        window.close()
+        app.exit(0)
+
+    def fail() -> None:
+        LOGGER.error("Packaged UI check timed out")
+        poll.stop()
+        window.close()
+        app.exit(1)
+
+    poll.timeout.connect(complete)
+    timeout.timeout.connect(fail)
+    window.show()
+    poll.start()
+    timeout.start(15_000)
+    return app.exec()
 
 
 def main(script_path: Path) -> int:
     QLocale.setDefault(ENGLISH_LOCALE)
     configure_logging()
+    LOGGER.info("Starting VRCX Time Together")
     try:
         database_path = resolve_database_path(script_path)
     except FileNotFoundError as error:
         if "--check" in sys.argv:
-            print(f"ERROR: {error}", file=sys.stderr)
+            if sys.stderr is not None:
+                print(f"ERROR: {error}", file=sys.stderr)
+            else:
+                LOGGER.error("%s", error)
             return 1
         app = QApplication(sys.argv)
         apply_theme(app)
         QMessageBox.critical(None, "VRCX Time Together", str(error))
         return 1
+    LOGGER.info("Using read-only VRCX database at %s", database_path)
     if "--check" in sys.argv:
         return run_check(database_path)
     app = QApplication(sys.argv)
@@ -1411,5 +1450,7 @@ def main(script_path: Path) -> int:
     app.setOrganizationName("VRCX Time Together")
     apply_theme(app)
     window = MainWindow(VrcxRepository(database_path), script_path)
+    if "--ui-check" in sys.argv:
+        return run_ui_check(app, window)
     window.show()
     return app.exec()

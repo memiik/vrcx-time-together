@@ -92,3 +92,36 @@ Run the focused domain tests:
 ```powershell
 py -3 -m unittest discover -s tests -v
 ```
+
+## Build the Windows application
+
+Windows releases are frozen with the committed PyInstaller specification and
+the exact dependency versions in `requirements-build.txt`. The result contains
+Python, Qt, PyQtGraph, and timezone data; users do not need Python installed.
+
+Build locally with Python 3.13.11:
+
+```powershell
+py -3.13 -m venv .venv-build
+.\.venv-build\Scripts\python.exe -m pip install -r .\requirements-build.txt
+.\.venv-build\Scripts\python.exe -m PyInstaller --noconfirm --clean .\packaging\windows\VRCX-Time-Together.spec
+```
+
+The executable is created at
+`dist\VRCX Time Together\VRCX Time Together.exe`. Distribute the entire
+`VRCX Time Together` folder, normally as a ZIP; the `_internal` directory is
+required beside the executable.
+
+The `Windows build and release` GitHub Actions workflow can also be run
+manually. Pushing a tag matching the application version builds and tests the
+portable package, creates a SHA-256 checksum, and publishes both files to a
+GitHub Release:
+
+```powershell
+git tag v2.0.0
+git push origin v2.0.0
+```
+
+Before creating a later release, update both `vrc_time_together.__version__`
+and `packaging/windows/version_info.txt` to the same version. The workflow
+rejects mismatched release tags.

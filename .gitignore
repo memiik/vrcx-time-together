@@ -1,2 +1,8 @@
 __pycache__/
 *.py[cod]
+.venv-build/
+.venv-build-313/
+.python-build/
+build/
+dist/
+release/
