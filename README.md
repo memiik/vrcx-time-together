@@ -1,4 +1,4 @@
-# VRCX Friendship Analytics
+# VRCX Time Together
 
 This project is an enhanced, standalone version of
 `%APPDATA%\VRCX\vrcx_top_friends.pyw`. The original file is not modified.
@@ -14,13 +14,13 @@ py -3 .\vrc-time-together.pyw
 The copy first looks for `VRCX.sqlite3` beside the script, then automatically
 uses `%APPDATA%\VRCX\VRCX.sqlite3`. The database is always opened read-only.
 
-Use **Find a friend** to narrow the ranking by display name. **Minimum time**
-removes brief encounters from the ranking, and **Show** controls how many
-matching friends are displayed. These ranking filters do not change the four
+Use **Find a friend** to narrow the list by display name. **Minimum time**
+removes brief shared sessions from the list, and **Show** controls how many
+matching friends are displayed. These list filters do not change the four
 overview metrics or daily chart, which continue to summarize all current
 friends in the selected date range.
 
-Select a row in the friend ranking to focus the time-series chart on that
+Select a row in the friend list to focus the time-series chart on that
 person. Ctrl-click additional rows to compare multiple friends as separate
 colored lines with shared hover values. The chart can group time by day, week,
 or month. In the all-friends view, switch between **Time with friends** and
@@ -37,7 +37,7 @@ py -3 .\vrc-time-together.pyw --check
 - **Total person-time**: sum of time spent with all current friends. Time with
   multiple friends at once is intentionally counted once per person.
 - **Time with friends**: actual wall-clock time when at least one current friend
-  was present. Overlapping encounters are merged, so an hour with three friends
+  was present. Overlapping sessions are merged, so an hour with three friends
   is one hour of social time rather than three person-hours.
 - **Daily average**: total person-time divided by all calendar days in the range,
   including inactive days.
@@ -47,6 +47,6 @@ py -3 .\vrc-time-together.pyw --check
   labels, and session splitting use the computer's local timezone, including
   daylight-saving changes.
 
-Rankings, encounter counts, and metrics only include people who are in the
+The friend list, shared-session counts, and metrics only include people in the
 active account's current-friends table. Former friends are not included, which
 matches the behavior of the source script.

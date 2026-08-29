@@ -15,7 +15,7 @@ except ImportError:
     get_localzone = None
 
 
-APP_TITLE = "VRCX · Friendship Analytics"
+APP_TITLE = "VRCX · Time Together"
 DB_NAME = "VRCX.sqlite3"
 
 BG = "#0d1117"
@@ -770,14 +770,14 @@ class TopFriendsApp(tk.Tk):
         heading.pack(fill="x", pady=(0, 20))
         tk.Label(
             heading,
-            text="Friendship Analytics",
+            text="Time Together",
             bg=BG,
             fg=TEXT,
             font=("Segoe UI Semibold", 24),
         ).pack(anchor="w")
         tk.Label(
             heading,
-            text="Explore who you spend time with using your local VRCX history",
+            text="A private, local view of the time you've shared in VRChat",
             bg=BG,
             fg=MUTED,
             font=("Segoe UI", 10),
@@ -971,7 +971,7 @@ class TopFriendsApp(tk.Tk):
         table_header.pack(fill="x", padx=14, pady=(11, 9))
         tk.Label(
             table_header,
-            text="FRIEND RANKING",
+            text="FRIENDS BY SHARED TIME",
             bg=PANEL,
             fg=TEXT,
             font=("Segoe UI Semibold", 10),
@@ -994,7 +994,7 @@ class TopFriendsApp(tk.Tk):
         self.tree.heading("rank", text="#", anchor="center")
         self.tree.heading("friend", text="FRIEND", anchor="w")
         self.tree.heading("duration", text="TIME TOGETHER", anchor="e")
-        self.tree.heading("visits", text="ENCOUNTERS", anchor="e")
+        self.tree.heading("visits", text="SHARED SESSIONS", anchor="e")
         self.tree.column("rank", width=55, minwidth=45, stretch=False, anchor="center")
         self.tree.column("friend", width=410, minwidth=180, anchor="w")
         self.tree.column("duration", width=170, minwidth=130, anchor="e")
@@ -1008,7 +1008,7 @@ class TopFriendsApp(tk.Tk):
         self.tree.pack(fill="both", expand=True, padx=(1, 0), pady=(0, 1))
         self.empty_state = tk.Label(
             table_frame,
-            text="No friends match these filters\nTry a longer date range or clear the ranking filters.",
+            text="No friends match these filters\nTry a longer date range or clear the list filters.",
             bg=PANEL,
             fg=MUTED,
             justify="center",
@@ -1348,16 +1348,16 @@ class TopFriendsApp(tk.Tk):
         if rows:
             summary = (
                 f"{start:%d %b %Y} – {end:%d %b %Y} · "
-                f"{encounters:,} encounters in visible ranking · "
+                f"{encounters:,} shared sessions in visible list · "
                 f"{friend_count} current friends · Latest data {latest_label}"
             )
         elif matching_count == 0:
             summary = (
-                f"No ranking matches · {friend_count} current friends · "
+                f"No friends match · {friend_count} current friends · "
                 f"Latest data {latest_label}"
             )
         else:
-            summary = f"No visible rankings · Latest data {latest_label}"
+            summary = f"No friends shown · Latest data {latest_label}"
         self.status.configure(text=summary)
 
 
@@ -1372,7 +1372,7 @@ def run_check(database_path: Path) -> int:
         raise RuntimeError("Social time cannot exceed total person-time.")
     peak_day, peak_value = max(daily, key=lambda item: item[1])
     print(
-        f"OK: {len(rows)} of {matching_count} rankings, {friend_count} current friends, "
+        f"OK: {len(rows)} of {matching_count} friends shown, {friend_count} current friends, "
         f"{len(daily)} daily points, {format_duration(social_total)} social time, "
         f"{format_duration(total)} person-time, "
         f"peak {peak_day} ({format_duration(peak_value)}), "
