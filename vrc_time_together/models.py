@@ -18,8 +18,16 @@ class FriendStat:
 
 
 @dataclass(frozen=True, slots=True)
+class FriendIdentity:
+    user_id: str
+    display_name: str
+    milliseconds: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class DashboardData:
     friends: tuple[FriendStat, ...]
+    friend_options: tuple[FriendIdentity, ...]
     matching_count: int
     latest_activity: datetime | None
     current_friend_count: int
@@ -54,3 +62,31 @@ class AppState:
 @dataclass(frozen=True, slots=True)
 class ComparisonData:
     series_by_user: dict[str, tuple[tuple[date, int], ...]]
+
+
+@dataclass(frozen=True, slots=True)
+class CoPresenceStat:
+    user_id: str
+    display_name: str
+    milliseconds: int
+    encounters: int
+
+
+@dataclass(frozen=True, slots=True)
+class FriendInsightsData:
+    friend: FriendIdentity
+    daily: tuple[tuple[date, int], ...]
+    weekday_hourly_milliseconds: tuple[tuple[int, ...], ...]
+    weekday_occurrences: tuple[int, ...]
+    sessions: int
+    context_milliseconds: tuple[int, int, int]
+    context_encounters: tuple[int, int, int]
+    co_presence: tuple[CoPresenceStat, ...]
+
+    @property
+    def total_milliseconds(self) -> int:
+        return sum(value for _day, value in self.daily)
+
+    @property
+    def active_days(self) -> int:
+        return sum(1 for _day, value in self.daily if value > 0)

@@ -60,6 +60,9 @@ easiest option; the portable build starts faster after extraction.
   monthly views.
 - Searchable friend analytics with typed numeric sorting for total time,
   sessions, average session, longest session, active days, and last seen.
+- Selectable friend insights with calendar and weekday/hour heatmaps, a
+  known-friend company-size breakdown, and ranked co-presence percentages by
+  overlapping time or encounters.
 - Multi-friend comparison using stable dark-theme colors, shared hover details,
   daily/weekly/monthly aggregation, and period or cumulative totals.
 - Mouse-wheel chart zoom, drag-to-pan, and one-click view reset.
@@ -67,9 +70,11 @@ easiest option; the portable build starts faster after extraction.
   invalidation when VRCX changes, and explicit manual refresh.
 - Local calendar-day splitting with daylight-saving-aware timezone conversion.
 
-Double-click a friend row to start a comparison, or check several people on
-the Compare page. `Ctrl+F` focuses search, `Escape` clears filters, `F5` forces
-a database refresh, and `Ctrl+1`, `Ctrl+2`, and `Ctrl+3` switch pages.
+Select a friend row and choose **Open friend insights** to inspect their
+patterns. Double-click a friend row to start a comparison, or check several
+people on the Compare page. `Ctrl+F` focuses the current search, `Escape` clears
+contextual input, `F5` forces a database refresh, and `Ctrl+1` through `Ctrl+4`
+switch pages.
 
 ## Metrics
 
@@ -79,6 +84,10 @@ a database refresh, and `Ctrl+1`, `Ctrl+2`, and `Ctrl+3` switch pages.
   person-hours.
 - Session statistics use completed `OnPlayerLeft` records, clipped to the
   selected local-time date range.
+- Friend Insights counts another current friend as co-present only where their
+  reconstructed sessions overlap in time and have the same recorded location.
+  Company-size labels describe **known current friends present**, not the total
+  number of all users in the VRChat instance.
 
 Only people in the active account's current-friends table are included, which
 matches VRCX's original top-friends behavior.
@@ -91,6 +100,8 @@ framework-independent inside the `vrc_time_together` package:
 
 - `qt_app.py` — native application shell, pages, models, and background workers
 - `qt_chart.py` — accelerated interactive time-series visualization
+- `qt_insights.py` — calendar, weekly rhythm, company-context, and co-presence
+  visualizations
 - `qt_theme.py` — Qt palette, component styling, and chart colors
 - `repository.py` — cached read-only queries and session aggregation
 - `models.py` — typed application state and result models

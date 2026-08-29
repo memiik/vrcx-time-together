@@ -109,6 +109,79 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(len(data.friends), 2)
         self.assertEqual(data.friends[0].longest_milliseconds, 2 * 3_600_000)
 
+    def test_friend_insights_split_time_and_measure_co_presence(self) -> None:
+        local_end = datetime.combine(
+            self.local_day,
+            datetime.min.time(),
+            tzinfo=LOCAL_TIMEZONE,
+        ).replace(hour=12)
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            connection.execute(
+                "INSERT INTO usr_test_friend_log_current VALUES (?, ?, '', ?)",
+                ("usr_c", "Gamma", 3),
+            )
+            connection.execute(
+                "INSERT INTO gamelog_join_leave VALUES "
+                "(3, ?, 'OnPlayerLeft', 'Gamma', 'wrld_other:1', 'usr_c', ?)",
+                (sqlite_timestamp(local_end), 60 * 60_000),
+            )
+            connection.commit()
+        data = VrcxRepository(self.database_path).load_friend_insights(
+            AppState(self.local_day, self.local_day), "usr_a"
+        )
+
+        self.assertEqual(data.total_milliseconds, 2 * 3_600_000)
+        self.assertEqual(data.sessions, 1)
+        self.assertEqual(data.active_days, 1)
+        self.assertEqual(
+            data.weekday_hourly_milliseconds[self.local_day.weekday()][10],
+            3_600_000,
+        )
+        self.assertEqual(
+            data.weekday_hourly_milliseconds[self.local_day.weekday()][11],
+            3_600_000,
+        )
+        self.assertEqual(
+            data.context_milliseconds,
+            (3_600_000, 3_600_000, 0),
+        )
+        self.assertEqual(data.context_encounters, (0, 1, 0))
+        self.assertEqual(len(data.co_presence), 1)
+        self.assertEqual(data.co_presence[0].user_id, "usr_b")
+        self.assertEqual(data.co_presence[0].milliseconds, 3_600_000)
+        self.assertEqual(data.co_presence[0].encounters, 1)
+
+    def test_friend_picker_catalog_is_not_limited_by_activity_filters(self) -> None:
+        beta_end = datetime.combine(
+            self.local_day,
+            datetime.min.time(),
+            tzinfo=LOCAL_TIMEZONE,
+        ).replace(hour=15)
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            connection.execute(
+                "INSERT INTO usr_test_friend_log_current VALUES (?, ?, '', ?)",
+                ("usr_inactive", "Inactive", 3),
+            )
+            connection.execute(
+                "INSERT INTO gamelog_join_leave VALUES "
+                "(3, ?, 'OnPlayerLeft', 'Beta', '', 'usr_b', ?)",
+                (sqlite_timestamp(beta_end), 60 * 60_000),
+            )
+            connection.commit()
+        data = VrcxRepository(self.database_path).load_dashboard(
+            AppState(
+                self.local_day,
+                self.local_day,
+                search_term="Alpha",
+                result_limit=1,
+            )
+        )
+        self.assertEqual([friend.display_name for friend in data.friends], ["Alpha"])
+        self.assertEqual(
+            [friend.display_name for friend in data.friend_options],
+            ["Beta", "Alpha", "Inactive"],
+        )
+
     def test_local_day_boundaries_cover_one_real_calendar_day(self) -> None:
         start, end = local_range_utc(self.local_day, self.local_day)
         self.assertEqual((end - start).total_seconds(), 24 * 60 * 60)

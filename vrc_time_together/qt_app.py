@@ -12,6 +12,7 @@ from typing import Callable
 from PySide6.QtCore import (
     QAbstractTableModel,
     QDate,
+    QEvent,
     QLocale,
     QModelIndex,
     QObject,
@@ -32,6 +33,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QComboBox,
+    QCompleter,
     QDateEdit,
     QFileDialog,
     QFrame,
@@ -46,6 +48,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QStackedWidget,
     QStatusBar,
@@ -63,8 +66,21 @@ from .formatting import (
     format_local_datetime,
 )
 from .logging_utils import configure_logging
-from .models import AppState, ComparisonData, DashboardData, FriendStat
+from .models import (
+    AppState,
+    ComparisonData,
+    DashboardData,
+    FriendIdentity,
+    FriendInsightsData,
+    FriendStat,
+)
 from .qt_chart import TimeSeriesChart
+from .qt_insights import (
+    CalendarHeatmap,
+    CompanyContextChart,
+    CoPresenceChart,
+    WeekHourHeatmap,
+)
 from .qt_theme import (
     ACCENT,
     SERIES_COLORS,
@@ -463,6 +479,56 @@ class DateRangePanel(QFrame):
         self.range_selected.emit(start, end, "Custom range")
 
 
+class SearchableComboBox(QComboBox):
+    """Editable combo that opens all options on click and filters while typing."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.setMaxVisibleItems(18)
+        editor = self.lineEdit()
+        if editor is not None:
+            editor.setPlaceholderText("Click or type to filter friends…")
+            editor.installEventFilter(self)
+            editor.textEdited.connect(self._filter_options)
+        completer = self.completer()
+        if completer is not None:
+            completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+            completer.setFilterMode(Qt.MatchFlag.MatchContains)
+            completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+            completer.setMaxVisibleItems(18)
+            completer.activated[str].connect(self._select_completion)
+
+    def _filter_options(self, value: str) -> None:
+        completer = self.completer()
+        if completer is None:
+            return
+        completer.setCompletionPrefix(value)
+        completer.complete()
+
+    def _select_completion(self, value: str) -> None:
+        index = self.findText(value, Qt.MatchFlag.MatchExactly)
+        if index >= 0:
+            self.setCurrentIndex(index)
+
+    def show_all_options(self) -> None:
+        editor = self.lineEdit()
+        completer = self.completer()
+        if editor is None or completer is None:
+            self.showPopup()
+            return
+        editor.setFocus()
+        editor.selectAll()
+        completer.setCompletionPrefix("")
+        completer.complete()
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt API
+        if watched is self.lineEdit() and event.type() == QEvent.Type.MouseButtonPress:
+            QTimer.singleShot(0, self.show_all_options)
+        return super().eventFilter(watched, event)
+
+
 class MainWindow(QMainWindow):
     def __init__(
         self,
@@ -483,8 +549,13 @@ class MainWindow(QMainWindow):
         self._workers: set[RepositoryWorker] = set()
         self._dashboard_generation = 0
         self._comparison_generation = 0
+        self._insights_generation = 0
         self._selected_friend_ids: list[str] = []
+        self._selected_insight_friend_id: str | None = None
+        self._current_friend_id: str | None = None
         self._friend_by_id: dict[str, FriendStat] = {}
+        self._friend_option_by_id: dict[str, FriendIdentity] = {}
+        self._friend_insights_data: FriendInsightsData | None = None
         self._settings = QSettings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION)
         self._dashboard_debounce = QTimer(self)
         self._dashboard_debounce.setSingleShot(True)
@@ -538,6 +609,7 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self._build_overview_page())
         self.pages.addWidget(self._build_friends_page())
         self.pages.addWidget(self._build_compare_page())
+        self.pages.addWidget(self._build_insights_page())
         main_layout.addWidget(self.pages, 1)
         root_layout.addWidget(main, 1)
         self.setCentralWidget(root)
@@ -574,6 +646,7 @@ class MainWindow(QMainWindow):
                 ("Overview", "Summary and trends"),
                 ("Friends", "Search and details"),
                 ("Compare", "Multi-friend analysis"),
+                ("Insights", "Selected-friend patterns"),
             )
         ):
             button = QPushButton(label)
@@ -688,12 +761,18 @@ class MainWindow(QMainWindow):
         self._comparison_debounce.stop()
         self._dashboard_generation += 1
         self._comparison_generation += 1
+        self._insights_generation += 1
         self.repository = candidate
         self.dashboard = None
         self._friend_by_id = {}
+        self._friend_option_by_id = {}
         self._selected_friend_ids = []
+        self._selected_insight_friend_id = None
+        self._current_friend_id = None
         self._comparison_data = None
+        self._friend_insights_data = None
         self.clear_comparison()
+        self.clear_friend_insights()
         self.date_range_panel.set_earliest_date(earliest)
         self.db_label.setText(database_path.name)
         self.db_label.setToolTip(str(database_path))
@@ -861,6 +940,14 @@ class MainWindow(QMainWindow):
         self.friend_detail_text.setWordWrap(True)
         detail_layout.addWidget(self.friend_detail_title)
         detail_layout.addWidget(self.friend_detail_text)
+        detail_actions = QHBoxLayout()
+        detail_actions.addStretch(1)
+        self.friend_insights_button = QPushButton("Open friend insights")
+        self.friend_insights_button.setObjectName("PrimaryButton")
+        self.friend_insights_button.setEnabled(False)
+        self.friend_insights_button.clicked.connect(self.open_current_friend_insights)
+        detail_actions.addWidget(self.friend_insights_button)
+        detail_layout.addLayout(detail_actions)
         layout.addWidget(self.friend_detail)
         return page
 
@@ -925,6 +1012,171 @@ class MainWindow(QMainWindow):
         layout.addWidget(splitter, 1)
         return page
 
+    def _build_insights_page(self) -> QWidget:
+        page, layout = self._page_container(
+            "Friend insights",
+            "Choose one friend to explore when you meet, the company context, and who is usually there.",
+        )
+
+        controls = QFrame()
+        controls.setObjectName("Panel")
+        controls_layout = QHBoxLayout(controls)
+        controls_layout.setContentsMargins(12, 10, 12, 10)
+        friend_label = QLabel("FRIEND")
+        friend_label.setObjectName("MetricLabel")
+        controls_layout.addWidget(friend_label)
+        self.insight_friend = SearchableComboBox()
+        self.insight_friend.setMinimumWidth(280)
+        self.insight_friend.setToolTip(
+            "Click to browse all current friends, or type to filter the list"
+        )
+        self.insight_friend.currentIndexChanged.connect(
+            self.insight_friend_changed
+        )
+        controls_layout.addWidget(self.insight_friend)
+        controls_layout.addStretch(1)
+        self.insight_scope = QLabel("Known current friends · same recorded instance")
+        self.insight_scope.setObjectName("Muted")
+        self.insight_scope.setToolTip(
+            "Group size counts overlapping current-friend records, not every person "
+            "who may have been in the instance."
+        )
+        controls_layout.addWidget(self.insight_scope)
+        layout.addWidget(controls)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 4, 4)
+        content_layout.setSpacing(12)
+
+        metrics_host = QWidget()
+        self.insight_metrics_layout = QGridLayout(metrics_host)
+        self.insight_metrics_layout.setContentsMargins(0, 0, 0, 0)
+        self.insight_metrics_layout.setHorizontalSpacing(11)
+        self.insight_metrics_layout.setVerticalSpacing(11)
+        self.insight_metric_cards = [
+            MetricCard(
+                "Time together",
+                ACCENT,
+                "Completed selected-friend session time clipped to this date range.",
+            ),
+            MetricCard(
+                "Active days",
+                "#5ba7ff",
+                "Local calendar days with recorded time together in this range.",
+            ),
+            MetricCard(
+                "Encounters",
+                SUCCESS,
+                "Completed selected-friend OnPlayerLeft sessions overlapping this range.",
+            ),
+        ]
+        for index, card in enumerate(self.insight_metric_cards):
+            self.insight_metrics_layout.addWidget(card, 0, index)
+        content_layout.addWidget(metrics_host)
+
+        calendar_panel = QFrame()
+        calendar_panel.setObjectName("Panel")
+        calendar_layout = QVBoxLayout(calendar_panel)
+        calendar_layout.setContentsMargins(16, 13, 16, 13)
+        calendar_header = QHBoxLayout()
+        calendar_title = QLabel("Days together")
+        calendar_title.setObjectName("SectionTitle")
+        calendar_header.addWidget(calendar_title)
+        calendar_header.addStretch(1)
+        calendar_note = QLabel("Darker cells mean more recorded time · click a day")
+        calendar_note.setObjectName("Muted")
+        calendar_header.addWidget(calendar_note)
+        calendar_layout.addLayout(calendar_header)
+        self.insight_calendar = CalendarHeatmap()
+        self.insight_calendar.day_selected.connect(self.show_insight_day)
+        self.insight_calendar_scroll = QScrollArea()
+        self.insight_calendar_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.insight_calendar_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.insight_calendar_scroll.setWidgetResizable(False)
+        self.insight_calendar_scroll.setFixedHeight(192)
+        self.insight_calendar_scroll.setWidget(self.insight_calendar)
+        calendar_layout.addWidget(self.insight_calendar_scroll)
+        self.insight_day_detail = QLabel("Select a day for its exact value")
+        self.insight_day_detail.setObjectName("Muted")
+        calendar_layout.addWidget(self.insight_day_detail)
+        content_layout.addWidget(calendar_panel)
+
+        rhythm_panel = QFrame()
+        rhythm_panel.setObjectName("Panel")
+        rhythm_layout = QVBoxLayout(rhythm_panel)
+        rhythm_layout.setContentsMargins(16, 13, 16, 13)
+        rhythm_header = QHBoxLayout()
+        rhythm_title = QLabel("Typical time of week")
+        rhythm_title.setObjectName("SectionTitle")
+        rhythm_header.addWidget(rhythm_title)
+        rhythm_header.addStretch(1)
+        self.insight_heatmap_mode = QComboBox()
+        self.insight_heatmap_mode.addItems(["Average per weekday", "Total in range"])
+        self.insight_heatmap_mode.currentTextChanged.connect(
+            self.render_insight_week_heatmap
+        )
+        rhythm_header.addWidget(self.insight_heatmap_mode)
+        rhythm_layout.addLayout(rhythm_header)
+        self.insight_week_heatmap = WeekHourHeatmap()
+        rhythm_layout.addWidget(self.insight_week_heatmap)
+        content_layout.addWidget(rhythm_panel)
+
+        company_panel = QFrame()
+        company_panel.setObjectName("Panel")
+        company_layout = QVBoxLayout(company_panel)
+        company_layout.setContentsMargins(16, 13, 16, 13)
+        company_title = QLabel("Known-friend company context")
+        company_title.setObjectName("SectionTitle")
+        company_layout.addWidget(company_title)
+        company_explanation = QLabel(
+            "Only this friend = no other current-friend record overlaps · "
+            "small = 1–3 others · larger = 4+ others. Encounter counts use "
+            "the context covering most of that encounter."
+        )
+        company_explanation.setObjectName("Muted")
+        company_explanation.setWordWrap(True)
+        company_layout.addWidget(company_explanation)
+        self.insight_company_chart = CompanyContextChart()
+        company_layout.addWidget(self.insight_company_chart)
+        content_layout.addWidget(company_panel)
+
+        presence_panel = QFrame()
+        presence_panel.setObjectName("Panel")
+        presence_layout = QVBoxLayout(presence_panel)
+        presence_layout.setContentsMargins(16, 13, 16, 13)
+        presence_header = QHBoxLayout()
+        presence_title = QLabel("Who is usually there?")
+        presence_title.setObjectName("SectionTitle")
+        presence_header.addWidget(presence_title)
+        presence_header.addStretch(1)
+        self.insight_presence_mode = QComboBox()
+        self.insight_presence_mode.addItems(["Time overlap", "Encounter overlap"])
+        self.insight_presence_mode.currentTextChanged.connect(
+            self.render_insight_co_presence
+        )
+        presence_header.addWidget(self.insight_presence_mode)
+        presence_layout.addLayout(presence_header)
+        presence_note = QLabel(
+            "Percentages do not add to 100% because several friends can be present at once."
+        )
+        presence_note.setObjectName("Muted")
+        presence_layout.addWidget(presence_note)
+        self.insight_presence_chart = CoPresenceChart()
+        presence_layout.addWidget(self.insight_presence_chart)
+        content_layout.addWidget(presence_panel)
+        content_layout.addStretch(1)
+
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
+        return page
+
     def _connect_shortcuts(self) -> None:
         refresh = QAction(self)
         refresh.setShortcut(QKeySequence("F5"))
@@ -938,7 +1190,7 @@ class MainWindow(QMainWindow):
         escape.setShortcut(QKeySequence("Escape"))
         escape.triggered.connect(self.clear_contextual_input)
         self.addAction(escape)
-        for index, key in enumerate(("Ctrl+1", "Ctrl+2", "Ctrl+3")):
+        for index, key in enumerate(("Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4")):
             action = QAction(self)
             action.setShortcut(QKeySequence(key))
             action.triggered.connect(lambda checked=False, value=index: self.set_page(value))
@@ -947,13 +1199,18 @@ class MainWindow(QMainWindow):
     def set_page(self, index: int) -> None:
         self.pages.setCurrentIndex(index)
         self.nav_buttons[index].setChecked(True)
-        self.page_context.setText(("OVERVIEW", "FRIENDS", "COMPARE")[index])
+        self.page_context.setText(("OVERVIEW", "FRIENDS", "COMPARE", "INSIGHTS")[index])
         if index == 1:
             QTimer.singleShot(0, self.friend_search.setFocus)
+        elif index == 3:
+            QTimer.singleShot(0, self.insight_friend.setFocus)
 
     def focus_search(self) -> None:
         if self.pages.currentIndex() == 2:
             self.compare_search.setFocus()
+        elif self.pages.currentIndex() == 3:
+            self.insight_friend.setFocus()
+            self.insight_friend.show_all_options()
         else:
             self.set_page(1)
             self.friend_search.setFocus()
@@ -961,6 +1218,9 @@ class MainWindow(QMainWindow):
     def clear_contextual_input(self) -> None:
         if self.pages.currentIndex() == 2:
             self.compare_search.clear()
+        elif self.pages.currentIndex() == 3:
+            self.insight_calendar.clear_selection()
+            self.insight_day_detail.setText("Select a day for its exact value")
         elif self.pages.currentIndex() == 1:
             self.clear_friend_filters()
 
@@ -1045,6 +1305,9 @@ class MainWindow(QMainWindow):
             self._comparison_generation += 1
             self._comparison_data = None
             self.compare_context.setText("Updating comparison for the new date range…")
+        if self._selected_insight_friend_id:
+            self._insights_generation += 1
+            self._friend_insights_data = None
         self._dashboard_generation += 1
         generation = self._dashboard_generation
         self.set_loading(True, "Loading local VRCX activity…")
@@ -1067,10 +1330,16 @@ class MainWindow(QMainWindow):
             return
         self.dashboard = data
         self._friend_by_id = {friend.user_id: friend for friend in data.friends}
+        self._friend_option_by_id = {
+            friend.user_id: friend for friend in data.friend_options
+        }
         self.friends_model.set_friends(list(data.friends))
+        self._current_friend_id = None
+        self.friend_insights_button.setEnabled(False)
         self.friends_table.sortByColumn(1, Qt.SortOrder.DescendingOrder)
         self.update_top_friends()
         self.populate_compare_list()
+        self.populate_insight_friends()
         self.update_metrics()
         self.render_overview_chart()
         self.set_loading(False)
@@ -1080,6 +1349,8 @@ class MainWindow(QMainWindow):
         )
         if self._selected_friend_ids:
             self.refresh_comparison()
+        if self._selected_insight_friend_id:
+            self.refresh_friend_insights()
 
     def update_top_friends(self) -> None:
         while self.top_friends_layout.count():
@@ -1166,11 +1437,172 @@ class MainWindow(QMainWindow):
             [(metric, series, ACCENT)], granularity, metric
         )
 
+    def populate_insight_friends(self) -> None:
+        if self.dashboard is None:
+            return
+        selected = self._selected_insight_friend_id
+        self.insight_friend.blockSignals(True)
+        self.insight_friend.clear()
+        for friend in self.dashboard.friend_options:
+            self.insight_friend.addItem(friend.display_name, friend.user_id)
+            item_index = self.insight_friend.count() - 1
+            self.insight_friend.setItemData(
+                item_index,
+                f"{format_duration(friend.milliseconds)} together in this range",
+                Qt.ItemDataRole.ToolTipRole,
+            )
+        selected_index = self.insight_friend.findData(selected) if selected else -1
+        if selected and selected_index < 0:
+            self._selected_insight_friend_id = None
+            self.clear_friend_insights()
+        self.insight_friend.setCurrentIndex(selected_index)
+        if selected_index < 0 and self.insight_friend.lineEdit() is not None:
+            self.insight_friend.lineEdit().clear()
+        self.insight_friend.blockSignals(False)
+
+    def insight_friend_changed(self, index: int) -> None:
+        user_id = self.insight_friend.itemData(index) if index >= 0 else None
+        if not user_id:
+            self._selected_insight_friend_id = None
+            self._insights_generation += 1
+            self.clear_friend_insights()
+            return
+        if user_id == self._selected_insight_friend_id and self._friend_insights_data:
+            return
+        self._selected_insight_friend_id = user_id
+        self.refresh_friend_insights()
+
+    def open_current_friend_insights(self) -> None:
+        if not self._current_friend_id:
+            return
+        index = self.insight_friend.findData(self._current_friend_id)
+        selection_changed = index >= 0 and self.insight_friend.currentIndex() != index
+        if selection_changed:
+            self.insight_friend.setCurrentIndex(index)
+        else:
+            self._selected_insight_friend_id = self._current_friend_id
+        self.set_page(3)
+        if not selection_changed and (
+            self._friend_insights_data is None
+            or self._friend_insights_data.friend.user_id != self._current_friend_id
+        ):
+            self.refresh_friend_insights()
+
+    def refresh_friend_insights(self) -> None:
+        user_id = self._selected_insight_friend_id
+        if not user_id:
+            return
+        state = self.collect_state()
+        self._insights_generation += 1
+        generation = self._insights_generation
+        friend = self._friend_option_by_id.get(user_id)
+        name = friend.display_name if friend else "selected friend"
+        self.set_loading(True, f"Loading insights for {name}…")
+        worker = RepositoryWorker(
+            generation,
+            lambda: self.repository.load_friend_insights(state, user_id),
+        )
+        worker.signals.result.connect(self.friend_insights_loaded)
+        worker.signals.error.connect(self.insights_error)
+        worker.signals.finished.connect(self.release_worker)
+        self._workers.add(worker)
+        self.thread_pool.start(worker)
+
+    @Slot(int, object)
+    def friend_insights_loaded(self, generation: int, result: object) -> None:
+        if generation != self._insights_generation:
+            return
+        data = result
+        if not isinstance(data, FriendInsightsData):
+            return
+        if data.friend.user_id != self._selected_insight_friend_id:
+            return
+        self._friend_insights_data = data
+        self.set_loading(False)
+        range_days = len(data.daily)
+        self.insight_metric_cards[0].set_value(
+            format_duration(data.total_milliseconds),
+            "Completed time in the selected range",
+        )
+        self.insight_metric_cards[1].set_value(
+            str(data.active_days),
+            f"of {range_days} local day{'s' if range_days != 1 else ''}",
+        )
+        self.insight_metric_cards[2].set_value(
+            f"{data.sessions:,}",
+            "Completed overlapping sessions",
+        )
+        self.insight_calendar.set_data(list(data.daily))
+        self.insight_day_detail.setText("Select a day for its exact value")
+        self.render_insight_week_heatmap()
+        self.insight_company_chart.set_data(
+            data.context_milliseconds,
+            data.context_encounters,
+        )
+        self.render_insight_co_presence()
+        QTimer.singleShot(
+            0,
+            lambda: self.insight_calendar_scroll.horizontalScrollBar().setValue(
+                self.insight_calendar_scroll.horizontalScrollBar().maximum()
+            ),
+        )
+        self.status_label.setText(
+            f"Insights for {data.friend.display_name} · {data.sessions:,} encounters · "
+            "known-current-friend company context"
+        )
+
+    def render_insight_week_heatmap(self, _value: str = "") -> None:
+        data = self._friend_insights_data
+        if data is None:
+            self.insight_week_heatmap.set_data(tuple(), tuple(), average=True)
+            return
+        self.insight_week_heatmap.set_data(
+            data.weekday_hourly_milliseconds,
+            data.weekday_occurrences,
+            average=self.insight_heatmap_mode.currentText() == "Average per weekday",
+        )
+
+    def render_insight_co_presence(self, _value: str = "") -> None:
+        data = self._friend_insights_data
+        if data is None:
+            self.insight_presence_chart.set_data(tuple(), 0, 0, "Time overlap")
+            return
+        self.insight_presence_chart.set_data(
+            data.co_presence,
+            data.total_milliseconds,
+            data.sessions,
+            self.insight_presence_mode.currentText(),
+        )
+
+    def show_insight_day(self, selected_day: date) -> None:
+        data = self._friend_insights_data
+        if data is None:
+            return
+        value = dict(data.daily).get(selected_day, 0)
+        self.insight_day_detail.setText(
+            f"{format_english_day(selected_day, include_year=True)} · "
+            f"{format_duration(value)} together"
+        )
+
+    def clear_friend_insights(self) -> None:
+        self._friend_insights_data = None
+        for card in getattr(self, "insight_metric_cards", ()):
+            card.set_value("—", "Select a friend")
+        if not hasattr(self, "insight_calendar"):
+            return
+        self.insight_calendar.set_data([])
+        self.insight_week_heatmap.set_data(tuple(), tuple(), average=True)
+        self.insight_company_chart.set_data((0, 0, 0), (0, 0, 0))
+        self.insight_presence_chart.set_data(tuple(), 0, 0, "Time overlap")
+        self.insight_day_detail.setText("Select a day for its exact value")
+
     def show_friend_detail(self) -> None:
         rows = self.friends_table.selectionModel().selectedRows()
         if not rows:
             return
         friend = self.friends_model.friends[rows[0].row()]
+        self._current_friend_id = friend.user_id
+        self.friend_insights_button.setEnabled(True)
         self.friend_detail_title.setText(friend.display_name)
         self.friend_detail_text.setText(
             f"<b>{format_duration(friend.milliseconds)}</b> together across "
@@ -1335,6 +1767,13 @@ class MainWindow(QMainWindow):
         self.set_loading(False)
         self.show_error(message)
 
+    @Slot(int, str, str)
+    def insights_error(self, generation: int, message: str, _kind: str) -> None:
+        if generation != self._insights_generation:
+            return
+        self.set_loading(False)
+        self.show_error(message)
+
     @Slot(object)
     def release_worker(self, worker: RepositoryWorker) -> None:
         self._workers.discard(worker)
@@ -1365,6 +1804,18 @@ class MainWindow(QMainWindow):
             self.metrics_layout.removeWidget(card)
         for index, card in enumerate(self.metric_cards):
             self.metrics_layout.addWidget(card, index // columns, index % columns)
+        if not hasattr(self, "insight_metric_cards"):
+            return
+        insight_columns = 2 if compact else 3
+        self.insight_scope.setVisible(not compact)
+        for card in self.insight_metric_cards:
+            self.insight_metrics_layout.removeWidget(card)
+        for index, card in enumerate(self.insight_metric_cards):
+            self.insight_metrics_layout.addWidget(
+                card,
+                index // insight_columns,
+                index % insight_columns,
+            )
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt API
         self._settings.setValue("windowGeometry", self.saveGeometry())

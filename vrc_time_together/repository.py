@@ -5,11 +5,20 @@ import os
 import sqlite3
 import threading
 from contextlib import closing
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .models import AppState, ComparisonData, DashboardData, FriendStat
+from .models import (
+    AppState,
+    CoPresenceStat,
+    ComparisonData,
+    DashboardData,
+    FriendIdentity,
+    FriendInsightsData,
+    FriendStat,
+)
 from .timezone_utils import (
     LOCAL_TIMEZONE,
     local_range_utc,
@@ -20,6 +29,15 @@ from .timezone_utils import (
 
 LOGGER = logging.getLogger(__name__)
 DB_NAME = "VRCX.sqlite3"
+
+
+@dataclass(frozen=True, slots=True)
+class _FriendInterval:
+    user_id: str
+    display_name: str
+    start: datetime
+    end: datetime
+    location: str
 
 
 class VrcxDataError(RuntimeError):
@@ -171,6 +189,33 @@ class VrcxRepository:
             self._cache[key] = result
         return result
 
+    def load_friend_insights(
+        self, state: AppState, user_id: str
+    ) -> FriendInsightsData:
+        signature = self._prepare_cache()
+        key = (
+            "friend-insights",
+            signature,
+            state.start_date,
+            state.end_date,
+            user_id,
+        )
+        with self._lock:
+            cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        try:
+            result = self._query_friend_insights(state, user_id)
+        except sqlite3.Error as error:
+            LOGGER.exception("Friend insights query failed")
+            raise VrcxDataError(
+                "The selected friend insights could not be read from VRCX. "
+                "Try again shortly."
+            ) from error
+        with self._lock:
+            self._cache[key] = result
+        return result
+
     def earliest_local_date(self) -> date:
         with closing(open_database(self.database_path)) as connection:
             value = connection.execute(
@@ -253,6 +298,28 @@ class VrcxRepository:
             per_friend, social = self._load_local_daily_series(
                 connection, state.start_date, state.end_date
             )
+            friend_options = tuple(
+                sorted(
+                    (
+                        FriendIdentity(
+                            row["user_id"],
+                            row["display_name"],
+                            sum(
+                                value
+                                for _day, value in per_friend.get(row["user_id"], ())
+                            ),
+                        )
+                        for row in connection.execute(
+                            f"SELECT user_id, display_name FROM "
+                            f"{quote_identifier(friend_table)}"
+                        )
+                    ),
+                    key=lambda friend: (
+                        -friend.milliseconds,
+                        friend.display_name.casefold(),
+                    ),
+                )
+            )
             friends = tuple(
                 FriendStat(
                     user_id=row["user_id"],
@@ -282,11 +349,194 @@ class VrcxRepository:
         )
         return DashboardData(
             friends=friends,
+            friend_options=friend_options,
             matching_count=matching_count,
             latest_activity=to_local(parse_utc(latest_value)),
             current_friend_count=friend_count,
             person_daily=person_time,
             social_daily=tuple(social),
+        )
+
+    def _query_friend_insights(
+        self, state: AppState, user_id: str
+    ) -> FriendInsightsData:
+        if state.end_date < state.start_date:
+            raise ValueError("The end date must be on or after the start date.")
+        days = [
+            state.start_date + timedelta(days=index)
+            for index in range((state.end_date - state.start_date).days + 1)
+        ]
+        range_start, range_end = local_range_utc(state.start_date, state.end_date)
+        with closing(open_database(self.database_path)) as connection:
+            friend_table = find_friend_table(connection)
+            identity_row = connection.execute(
+                f"SELECT user_id, display_name FROM {quote_identifier(friend_table)} "
+                "WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            if identity_row is None:
+                raise VrcxDataError(
+                    "The selected person is not in the active current-friends table."
+                )
+            parameters = {
+                "start_at": sqlite_timestamp(range_start),
+                "end_at": sqlite_timestamp(range_end),
+            }
+            rows = connection.execute(
+                f"""
+                SELECT
+                    f.user_id,
+                    f.display_name,
+                    j.created_at,
+                    j.time,
+                    COALESCE(j.location, '') AS location
+                FROM gamelog_join_leave AS j
+                JOIN {quote_identifier(friend_table)} AS f ON f.user_id = j.user_id
+                WHERE j.type = 'OnPlayerLeft'
+                  AND j.time > 0
+                  AND julianday(j.created_at) > julianday(:start_at)
+                  AND julianday(j.created_at) - (j.time / 86400000.0)
+                        < julianday(:end_at)
+                ORDER BY j.created_at
+                """,
+                parameters,
+            )
+            intervals: list[_FriendInterval] = []
+            for row in rows:
+                event_end = parse_utc(row["created_at"])
+                if event_end is None:
+                    continue
+                event_start = event_end - timedelta(milliseconds=row["time"])
+                clipped_start = max(event_start, range_start)
+                clipped_end = min(event_end, range_end)
+                if clipped_start >= clipped_end:
+                    continue
+                intervals.append(
+                    _FriendInterval(
+                        user_id=row["user_id"],
+                        display_name=row["display_name"],
+                        start=clipped_start,
+                        end=clipped_end,
+                        location=row["location"],
+                    )
+                )
+
+        target_intervals = [
+            interval for interval in intervals if interval.user_id == user_id
+        ]
+        daily_totals = {day: 0 for day in days}
+        weekday_hourly = [[0 for _hour in range(24)] for _weekday in range(7)]
+        weekday_occurrences = [0 for _weekday in range(7)]
+        for day in days:
+            weekday_occurrences[day.weekday()] += 1
+        for interval in target_intervals:
+            cursor = interval.start
+            while cursor < interval.end:
+                local_cursor = cursor.astimezone(LOCAL_TIMEZONE)
+                local_day = local_cursor.date()
+                next_midnight = datetime.combine(
+                    local_day + timedelta(days=1),
+                    time.min,
+                    tzinfo=LOCAL_TIMEZONE,
+                ).astimezone(timezone.utc)
+                seconds_into_hour = (
+                    local_cursor.minute * 60
+                    + local_cursor.second
+                    + local_cursor.microsecond / 1_000_000
+                )
+                next_hour = cursor + timedelta(seconds=3600 - seconds_into_hour)
+                segment_end = min(interval.end, next_midnight, next_hour)
+                milliseconds = round(
+                    (segment_end - cursor).total_seconds() * 1000
+                )
+                if local_day in daily_totals:
+                    daily_totals[local_day] += milliseconds
+                    weekday_hourly[local_day.weekday()][local_cursor.hour] += milliseconds
+                cursor = segment_end
+
+        by_location: dict[str, list[_FriendInterval]] = {}
+        names: dict[str, str] = {}
+        for interval in intervals:
+            by_location.setdefault(interval.location, []).append(interval)
+            names[interval.user_id] = interval.display_name
+
+        context_milliseconds = [0, 0, 0]
+        context_encounters = [0, 0, 0]
+        co_milliseconds: dict[str, int] = {}
+        co_encounters: dict[str, int] = {}
+        for target in target_intervals:
+            candidates: list[tuple[str, datetime, datetime]] = []
+            boundaries = {target.start, target.end}
+            for other in by_location.get(target.location, ()):
+                if other.user_id == user_id:
+                    continue
+                overlap_start = max(target.start, other.start)
+                overlap_end = min(target.end, other.end)
+                if overlap_start >= overlap_end:
+                    continue
+                candidates.append((other.user_id, overlap_start, overlap_end))
+                boundaries.add(overlap_start)
+                boundaries.add(overlap_end)
+
+            encounter_context = [0, 0, 0]
+            encountered_users: set[str] = set()
+            ordered_boundaries = sorted(boundaries)
+            for index in range(len(ordered_boundaries) - 1):
+                segment_start = ordered_boundaries[index]
+                segment_end = ordered_boundaries[index + 1]
+                if segment_start >= segment_end:
+                    continue
+                present = {
+                    other_id
+                    for other_id, other_start, other_end in candidates
+                    if other_start < segment_end and other_end > segment_start
+                }
+                milliseconds = round(
+                    (segment_end - segment_start).total_seconds() * 1000
+                )
+                category = 0 if not present else 1 if len(present) <= 3 else 2
+                context_milliseconds[category] += milliseconds
+                encounter_context[category] += milliseconds
+                encountered_users.update(present)
+                for other_id in present:
+                    co_milliseconds[other_id] = (
+                        co_milliseconds.get(other_id, 0) + milliseconds
+                    )
+            if encounter_context:
+                dominant = max(
+                    range(3), key=lambda category: (encounter_context[category], category)
+                )
+                context_encounters[dominant] += 1
+            for other_id in encountered_users:
+                co_encounters[other_id] = co_encounters.get(other_id, 0) + 1
+
+        co_presence = tuple(
+            sorted(
+                (
+                    CoPresenceStat(
+                        user_id=other_id,
+                        display_name=names.get(other_id, other_id),
+                        milliseconds=milliseconds,
+                        encounters=co_encounters.get(other_id, 0),
+                    )
+                    for other_id, milliseconds in co_milliseconds.items()
+                ),
+                key=lambda stat: (-stat.milliseconds, stat.display_name.casefold()),
+            )
+        )
+        return FriendInsightsData(
+            friend=FriendIdentity(
+                identity_row["user_id"], identity_row["display_name"]
+            ),
+            daily=tuple((day, daily_totals[day]) for day in days),
+            weekday_hourly_milliseconds=tuple(
+                tuple(hours) for hours in weekday_hourly
+            ),
+            weekday_occurrences=tuple(weekday_occurrences),
+            sessions=len(target_intervals),
+            context_milliseconds=tuple(context_milliseconds),
+            context_encounters=tuple(context_encounters),
+            co_presence=co_presence,
         )
 
     def _load_local_daily_series(
