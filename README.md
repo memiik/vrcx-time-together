@@ -26,6 +26,27 @@ Use **Change database** in the sidebar to select a database stored elsewhere.
 The validated path is remembered for future launches; **Use automatic path**
 returns to the lookup order above.
 
+## Use the prebuilt Windows artifact
+
+No Python installation is needed for the packaged application.
+
+1. Open the repository's **Actions** tab and select the completed
+   **Windows build and release** run.
+2. Under **Artifacts**, download `VRCX-Time-Together-windows-x64`.
+3. Extract the downloaded artifact ZIP. It contains a portable application ZIP
+   and its `.sha256` checksum.
+4. Extract `VRCX-Time-Together-1.0.0-<commit>-windows-x64.zip` to a permanent
+   folder. Do not move the executable out of that folder because its
+   `_internal` directory is required.
+5. Double-click `VRCX Time Together.exe`.
+
+The app automatically reads `%APPDATA%\VRCX\VRCX.sqlite3`. If VRCX is installed
+elsewhere or you keep a copied database, use **Change database** in the app and
+select its `VRCX.sqlite3` file. The database is always opened read-only.
+
+For tagged releases, download the Windows ZIP directly from the repository's
+**Releases** page, extract it once, and run `VRCX Time Together.exe`.
+
 ## Features
 
 - Local-time date ranges with Today, 7/30/90 days, this month, last month,
@@ -118,8 +139,8 @@ portable package, creates a SHA-256 checksum, and publishes both files to a
 GitHub Release:
 
 ```powershell
-git tag v2.0.0
-git push origin v2.0.0
+git tag v1.0.0
+git push origin v1.0.0
 ```
 
 Before creating a later release, update both `vrc_time_together.__version__`
