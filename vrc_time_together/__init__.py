@@ -1,3 +1,3 @@
 """Core package for the VRCX Time Together desktop application."""
 
-__version__ = "1.1.0"
+__version__ = "2.0.0"

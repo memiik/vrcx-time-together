@@ -7,7 +7,11 @@ from contextlib import closing
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from vrc_time_together.formatting import format_duration
+from vrc_time_together.formatting import (
+    format_duration,
+    format_english_date,
+    format_english_day,
+)
 from vrc_time_together.models import AppState
 from vrc_time_together.repository import (
     VrcxRepository,
@@ -26,6 +30,11 @@ class FormattingTests(unittest.TestCase):
         self.assertEqual(format_duration(42_000), "42s")
         self.assertEqual(format_duration(8 * 60_000), "8m")
         self.assertEqual(format_duration((84 * 60 + 24) * 60_000), "3d 12h")
+
+    def test_calendar_labels_are_deterministically_english(self) -> None:
+        value = date(2026, 8, 2)
+        self.assertEqual(format_english_date(value), "02 August 2026")
+        self.assertEqual(format_english_day(value, include_year=True), "Sunday, 02 Aug 2026")
 
     def test_weekly_aggregation_preserves_totals(self) -> None:
         daily = [

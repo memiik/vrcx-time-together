@@ -7,7 +7,7 @@ remote services.
 
 ## Run
 
-Install the small timezone dependency once:
+Install the native UI and timezone dependencies once:
 
 ```powershell
 py -3 -m pip install -r .\requirements.txt
@@ -22,24 +22,32 @@ py -3 .\vrc-time-together.pyw
 The app first looks for `VRCX.sqlite3` beside the script, then uses
 `%APPDATA%\VRCX\VRCX.sqlite3`. Connections use SQLite URI read-only mode plus
 `PRAGMA query_only`; writes, schema changes, and migrations are not permitted.
+Use **Change database** in the sidebar to select a database stored elsewhere.
+The validated path is remembered for future launches; **Use automatic path**
+returns to the lookup order above.
 
 ## Features
 
 - Local-time date ranges with Today, 7/30/90 days, this month, last month,
-  this year, all-time, and custom presets.
-- Social-time, friends-in-range, most-social-day, and top-friend overview cards.
-- Searchable friend analytics with numeric sorting for total time, sessions,
-  average session, longest session, active days, and last seen.
+  this year, all-time, and custom presets in an English-only range picker.
+- A polished native Qt dashboard with responsive metric cards, background
+  loading states, persistent window geometry, and a compact navigation rail.
+- An inline English local-date tray with quick presets and exact date controls.
+- Period-aware KPIs for social time, friends, sessions, peak day, and top friend.
+- Interactive social-time and person-time trends with daily, weekly, and
+  monthly views.
+- Searchable friend analytics with typed numeric sorting for total time,
+  sessions, average session, longest session, active days, and last seen.
 - Multi-friend comparison using stable dark-theme colors, shared hover details,
   daily/weekly/monthly aggregation, and period or cumulative totals.
-- Mouse-wheel chart zoom, drag-to-pan, double-click or **Reset zoom** to reset.
+- Mouse-wheel chart zoom, drag-to-pan, and one-click view reset.
 - Background database loading, lightweight result caching, automatic cache
   invalidation when VRCX changes, and explicit manual refresh.
 - Local calendar-day splitting with daylight-saving-aware timezone conversion.
 
-Ctrl-click friend rows to compare several people. `Ctrl+F` focuses search,
-`Escape` clears list filters, `Enter` refreshes, and `F5` forces a database
-refresh.
+Double-click a friend row to start a comparison, or check several people on
+the Compare page. `Ctrl+F` focuses search, `Escape` clears filters, `F5` forces
+a database refresh, and `Ctrl+1`, `Ctrl+2`, and `Ctrl+3` switch pages.
 
 ## Metrics
 
@@ -55,14 +63,17 @@ matches VRCX's original top-friends behavior.
 
 ## Architecture
 
-The `.pyw` file remains the directly launchable native Tkinter UI entry point.
-Domain logic is separated into the `vrc_time_together` package:
+The `.pyw` file remains the directly launchable native Windows entry point.
+The interface uses PySide6 (Qt 6) and PyQtGraph; the data layer remains
+framework-independent inside the `vrc_time_together` package:
 
+- `qt_app.py` — native application shell, pages, models, and background workers
+- `qt_chart.py` — accelerated interactive time-series visualization
+- `qt_theme.py` — Qt palette, component styling, and chart colors
 - `repository.py` — cached read-only queries and session aggregation
 - `models.py` — typed application state and result models
 - `timezone_utils.py` — aware UTC/local conversions and range boundaries
 - `formatting.py` — centralized duration and human-readable date formatting
-- `theme.py` — shared dark-theme colors and typography
 - `logging_utils.py` — rotating local diagnostic log configuration
 
 Technical logs are stored under `%LOCALAPPDATA%\VRCX Time Together` and do not
