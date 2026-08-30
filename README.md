@@ -1,24 +1,29 @@
 # VRCX Time Together
 
-VRCX Time Together is a private Windows desktop dashboard for understanding the time you spend with your VRChat friends. It turns local VRCX history into clear timelines, relationship statistics, co-presence maps, and per-friend patterns.
+> Your VRChat history, made easier to understand.
 
-Everything stays on your computer: the application opens the VRCX SQLite database in read-only mode, sends no telemetry, and never writes to or migrates your VRCX data.
+VRCX Time Together is a private companion app for VRCX. It runs separately and analyzes the local SQLite history that VRCX stores, turning it into clear timelines, relationship statistics, co-presence maps, and per-friend patterns—without sending that history anywhere.
 
-## At a glance
+![VRCX Time Together overview dashboard](docs/screenshots/overview.png)
 
-- Explore social time in a selected local-date range.
-- See which friends you met most, how often, and for how long.
-- Compare several friends on one interactive timeline.
-- Discover friend groups and repeated co-presence through the Friend Map.
-- Inspect one friend’s days, usual hours, company context, and recurring co-presence.
+It reads the SQLite database maintained by VRCX locally in strict read-only mode. The app does not modify VRCX or its data, use telemetry, or send data to remote services.
+
+## Highlights
+
+- **Overview dashboard** — period-aware KPIs, social activity trends, and top friends.
+- **Friend Map** — a navigable relationship view of measured same-instance overlap.
+- **Shared Time** — view several friends’ time together on zoomable daily, weekly, or monthly timelines.
+- **Friend Insights** — calendar and time-of-week heatmaps, company context, and co-presence rankings.
+- **Friend search** — filter and sort relationships by time, sessions, active days, and first or last seen dates.
+- **Flexible local dates** — quick presets plus exact custom date ranges, interpreted in local time.
+- **Your database, your choice** — use the database VRCX stores automatically or select another VRCX SQLite database.
+- **Private by design** — entirely local, read-only analysis with no telemetry.
 
 ## Features
 
 ### Overview
 
 The Overview page is the starting point for a selected period. It summarizes social time, friend count, shared sessions, your most social day, and top friend. Its zoomable activity chart shows when you were social, while the ranked list makes the biggest relationships immediately visible.
-
-![Overview dashboard](docs/screenshots/overview.png)
 
 ### Friends
 
@@ -32,11 +37,18 @@ The Friend Map visualizes which current friends share recorded VRChat instances.
 
 ![Friend Map](docs/screenshots/friend-map.png)
 
+#### How to read the Friend Map
+
+- **Colors** indicate activity rank for the selected period: purple is the top 5, cyan is 6–10, blue is 11–20, and green is 21+.
+- **Node size** represents recorded time around you; friends with stronger measured relationships tend to be positioned closer together.
+- **Connections** require both friends to have been recorded in the same known VRChat instance. A brighter or thicker line means a stronger value for the selected metric.
+- **Gold** highlights the selected friend’s strongest overlap, and also marks the connection under the pointer.
+
 ### Shared Time
 
-Choose several friends to compare their time with you on a shared interactive chart. Filter the picker, adjust the selected people, and switch between daily, weekly, and monthly views or period and cumulative totals. Distinct stable colors make recurring patterns and differences easy to spot.
+Choose several friends to view their time with you side by side on a shared interactive chart. Filter the picker, adjust the selected people, and switch between daily, weekly, and monthly views or period and cumulative totals. Distinct stable colors make recurring patterns easy to spot.
 
-![Shared Time comparison](docs/screenshots/shared-time.png)
+![Shared Time timeline](docs/screenshots/shared-time.png)
 
 ### Friend Insights
 
@@ -73,6 +85,10 @@ The app first looks for `VRCX.sqlite3` beside the script, then at `%APPDATA%\VRC
 
 The connection uses SQLite URI read-only mode plus `PRAGMA query_only`; writes, schema changes, and migrations are not permitted.
 
+### Date ranges and database location
+
+Choose from **Today**, **Last 7/30/90 days**, **This month**, **Last month**, **This year**, or **All time**, or enter exact start and end dates. All ranges use local calendar dates and timezone-aware boundaries. The app first checks for `VRCX.sqlite3` beside the script, then `%APPDATA%\VRCX\VRCX.sqlite3`; **Change database** selects another location and **Use automatic path** restores that lookup order.
+
 ## Keyboard shortcuts
 
 | Shortcut | Action |
@@ -99,7 +115,7 @@ For tagged releases, the standalone `.exe` and portable ZIP are also available f
 
 VRCX Time Together is intentionally local-first. It:
 
-- reads a local VRCX database only;
+- reads only the local SQLite database maintained by VRCX;
 - opens that database read-only;
 - performs no telemetry or remote synchronization; and
 - stores only technical diagnostic logs under `%LOCALAPPDATA%\VRCX Time Together`, without friend-history data.
@@ -130,6 +146,15 @@ py -3 -m unittest discover -s tests -v
 - `repository.py` — cached read-only queries and session aggregation
 - `models.py` — typed application state and result models
 - `timezone_utils.py` — UTC/local conversions and range boundaries
+
+## Technologies
+
+- **Python** provides the application and data-processing layer.
+- **PySide6** delivers the native Qt 6 Windows interface.
+- **PyQtGraph** powers interactive time-series visualizations.
+- **SQLite** is the local history database maintained by VRCX, opened read-only by this app.
+- **PyInstaller** produces standalone and portable Windows packages.
+- **GitHub Actions** tests, builds, creates SHA-256 checksums, and publishes tagged releases.
 
 ## Build the Windows application
 
