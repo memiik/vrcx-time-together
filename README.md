@@ -65,6 +65,9 @@ easiest option; the portable build starts faster after extraction.
   overlapping time or encounters.
 - Multi-friend comparison using stable dark-theme colors, shared hover details,
   daily/weekly/monthly aggregation, and period or cumulative totals.
+- An interactive friend map where node size reflects time around you and links
+  can show either total overlap or normalized co-appearance likelihood between
+  current friends in the same recorded VRChat instance.
 - Mouse-wheel chart zoom, drag-to-pan, and one-click view reset.
 - Background database loading, lightweight result caching, automatic cache
   invalidation when VRCX changes, and explicit manual refresh.
@@ -72,7 +75,7 @@ easiest option; the portable build starts faster after extraction.
 
 Select a friend row and choose **Open friend insights** to inspect their
 patterns. Double-click a friend row to start a comparison, or check several
-people on the Compare page. `Ctrl+F` focuses the current search, `Escape` clears
+people on the Shared Time page. `Ctrl+F` focuses the current search, `Escape` clears
 contextual input, `F5` forces a database refresh, and `Ctrl+1` through `Ctrl+4`
 switch pages.
 
@@ -100,6 +103,7 @@ framework-independent inside the `vrc_time_together` package:
 
 - `qt_app.py` — native application shell, pages, models, and background workers
 - `qt_chart.py` — accelerated interactive time-series visualization
+- `qt_friend_map.py` — native zoomable co-presence network visualization
 - `qt_insights.py` — calendar, weekly rhythm, company-context, and co-presence
   visualizations
 - `qt_theme.py` — Qt palette, component styling, and chart colors

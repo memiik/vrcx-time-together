@@ -127,6 +127,15 @@ QLabel#MetricDetail {{
     color: {TEXT_MUTED};
     font-size: 9px;
 }}
+QLabel#MapInspectorValue {{
+    color: {TEXT};
+    font-size: 14px;
+    font-weight: 700;
+}}
+QLabel#MapInspectorLabel {{
+    color: {TEXT_MUTED};
+    font-size: 9px;
+}}
 QLabel#KpiInfo {{
     color: {TEXT_MUTED};
     background: {SURFACE_RAISED};
@@ -229,6 +238,36 @@ QPushButton#QuietButton {{
 QPushButton#QuietButton:hover {{
     color: {TEXT};
     background: {SURFACE_RAISED};
+}}
+QPushButton#MapSegmentButton {{
+    min-height: 28px;
+    padding: 0 10px;
+    color: {TEXT_MUTED};
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-right: 0;
+    border-radius: 0;
+    font-size: 9px;
+    font-weight: 650;
+}}
+QPushButton#MapSegmentButton[segmentPosition="first"] {{
+    border-top-left-radius: 7px;
+    border-bottom-left-radius: 7px;
+}}
+QPushButton#MapSegmentButton[segmentPosition="last"] {{
+    border-right: 1px solid {BORDER};
+    border-top-right-radius: 7px;
+    border-bottom-right-radius: 7px;
+}}
+QPushButton#MapSegmentButton:hover {{
+    color: {TEXT};
+    background: {SURFACE_HOVER};
+}}
+QPushButton#MapSegmentButton:checked {{
+    color: white;
+    background: {ACCENT_SOFT};
+    border-color: {ACCENT};
+    border-right: 1px solid {ACCENT};
 }}
 QPushButton#PresetButton {{
     min-width: 94px;
