@@ -75,7 +75,7 @@ easiest option; the portable build starts faster after extraction.
 
 Select a friend row and choose **Open friend insights** to inspect their
 patterns. Double-click a friend row to start a comparison, or check several
-people on the Compare page. `Ctrl+F` focuses the current search, `Escape` clears
+people on the Shared Time page. `Ctrl+F` focuses the current search, `Escape` clears
 contextual input, `F5` forces a database refresh, and `Ctrl+1` through `Ctrl+4`
 switch pages.
 
