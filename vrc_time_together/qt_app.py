@@ -111,6 +111,11 @@ ENGLISH_LOCALE = QLocale(QLocale.Language.English, QLocale.Country.UnitedKingdom
 SETTINGS_ORGANIZATION = "VRCX Time Together"
 SETTINGS_APPLICATION = "Desktop"
 DATABASE_PATH_KEY = "databasePath"
+PAGE_OVERVIEW = 0
+PAGE_FRIENDS = 1
+PAGE_FRIEND_MAP = 2
+PAGE_SHARED_TIME = 3
+PAGE_INSIGHTS = 4
 
 
 def resolve_database_path(script_path: Path) -> Path:
@@ -619,9 +624,9 @@ class MainWindow(QMainWindow):
         self.pages = QStackedWidget()
         self.pages.addWidget(self._build_overview_page())
         self.pages.addWidget(self._build_friends_page())
+        self.pages.addWidget(self._build_friend_map_page())
         self.pages.addWidget(self._build_compare_page())
         self.pages.addWidget(self._build_insights_page())
-        self.pages.addWidget(self._build_friend_map_page())
         main_layout.addWidget(self.pages, 1)
         root_layout.addWidget(main, 1)
         self.setCentralWidget(root)
@@ -657,9 +662,9 @@ class MainWindow(QMainWindow):
             (
                 ("Overview", "Summary and trends"),
                 ("Friends", "Search and details"),
+                ("Friend Map", "Interactive co-presence network"),
                 ("Shared Time", "Multi-friend timeline"),
                 ("Insights", "Selected-friend patterns"),
-                ("Friend map", "Interactive co-presence network"),
             )
         ):
             button = QPushButton(label)
@@ -670,7 +675,7 @@ class MainWindow(QMainWindow):
             self.nav_group.addButton(button, index)
             self.nav_buttons.append(button)
             layout.addWidget(button)
-        self.nav_buttons[0].setChecked(True)
+        self.nav_buttons[PAGE_OVERVIEW].setChecked(True)
         layout.addStretch(1)
 
         privacy = QLabel("●  LOCAL & READ-ONLY")
@@ -895,7 +900,7 @@ class MainWindow(QMainWindow):
         top_header.addWidget(top_title)
         top_header.addStretch(1)
         open_friends = QPushButton("View all friends")
-        open_friends.clicked.connect(lambda: self.set_page(1))
+        open_friends.clicked.connect(lambda: self.set_page(PAGE_FRIENDS))
         top_header.addWidget(open_friends)
         top_layout.addLayout(top_header)
         self.top_friends_host = QWidget()
@@ -1196,7 +1201,7 @@ class MainWindow(QMainWindow):
 
     def _build_friend_map_page(self) -> QWidget:
         page, layout = self._page_container(
-            "Friend map",
+            "Friend Map",
             "See who has been around you most and which current friends tend to overlap in the same recorded instance.",
         )
 
@@ -1459,36 +1464,40 @@ class MainWindow(QMainWindow):
         self.pages.setCurrentIndex(index)
         self.nav_buttons[index].setChecked(True)
         self.page_context.setText(
-            ("OVERVIEW", "FRIENDS", "SHARED TIME", "INSIGHTS", "FRIEND MAP")[index]
+            ("OVERVIEW", "FRIENDS", "FRIEND MAP", "SHARED TIME", "INSIGHTS")[index]
         )
-        if index == 1:
+        if index == PAGE_FRIENDS:
             QTimer.singleShot(0, self.friend_search.setFocus)
-        elif index == 3:
+        elif index == PAGE_INSIGHTS:
             QTimer.singleShot(0, self.insight_friend.setFocus)
-        elif index == 4 and self.dashboard is not None and self._friend_map_data is None:
+        elif (
+            index == PAGE_FRIEND_MAP
+            and self.dashboard is not None
+            and self._friend_map_data is None
+        ):
             self.refresh_friend_map()
 
     def focus_search(self) -> None:
-        if self.pages.currentIndex() == 2:
+        if self.pages.currentIndex() == PAGE_SHARED_TIME:
             self.compare_search.setFocus()
-        elif self.pages.currentIndex() == 3:
+        elif self.pages.currentIndex() == PAGE_INSIGHTS:
             self.insight_friend.setFocus()
             self.insight_friend.show_all_options()
-        elif self.pages.currentIndex() == 4:
+        elif self.pages.currentIndex() == PAGE_FRIEND_MAP:
             return
         else:
-            self.set_page(1)
+            self.set_page(PAGE_FRIENDS)
             self.friend_search.setFocus()
 
     def clear_contextual_input(self) -> None:
-        if self.pages.currentIndex() == 2:
+        if self.pages.currentIndex() == PAGE_SHARED_TIME:
             self.compare_search.clear()
-        elif self.pages.currentIndex() == 3:
+        elif self.pages.currentIndex() == PAGE_INSIGHTS:
             self.insight_calendar.clear_selection()
             self.insight_day_detail.setText("Select a day for its exact value")
-        elif self.pages.currentIndex() == 4:
+        elif self.pages.currentIndex() == PAGE_FRIEND_MAP:
             self.friend_map.reset_view()
-        elif self.pages.currentIndex() == 1:
+        elif self.pages.currentIndex() == PAGE_FRIENDS:
             self.clear_friend_filters()
 
     def toggle_date_range_panel(self, visible: bool) -> None:
@@ -1575,7 +1584,10 @@ class MainWindow(QMainWindow):
         if self._selected_insight_friend_id:
             self._insights_generation += 1
             self._friend_insights_data = None
-        if self._friend_map_data is not None or self.pages.currentIndex() == 4:
+        if (
+            self._friend_map_data is not None
+            or self.pages.currentIndex() == PAGE_FRIEND_MAP
+        ):
             self._map_generation += 1
             self._friend_map_data = None
         self._dashboard_generation += 1
@@ -1621,7 +1633,7 @@ class MainWindow(QMainWindow):
             self.refresh_comparison()
         if self._selected_insight_friend_id:
             self.refresh_friend_insights()
-        if self.pages.currentIndex() == 4:
+        if self.pages.currentIndex() == PAGE_FRIEND_MAP:
             self.refresh_friend_map()
 
     def update_top_friends(self) -> None:
@@ -1753,7 +1765,7 @@ class MainWindow(QMainWindow):
             self.insight_friend.setCurrentIndex(index)
         else:
             self._selected_insight_friend_id = self._current_friend_id
-        self.set_page(3)
+        self.set_page(PAGE_INSIGHTS)
         if not selection_changed and (
             self._friend_insights_data is None
             or self._friend_insights_data.friend.user_id != self._current_friend_id
@@ -1894,7 +1906,7 @@ class MainWindow(QMainWindow):
         self.set_loading(False)
         self.render_friend_map()
         self.status_label.setText(
-            f"Friend map ready · {len(data.nodes)} active friends considered · "
+            f"Friend Map ready · {len(data.nodes)} active friends considered · "
             f"{len(data.links)} same-instance connections"
         )
 
@@ -2065,7 +2077,7 @@ class MainWindow(QMainWindow):
         friend = self.friends_model.friends[index.row()]
         self._selected_friend_ids = [friend.user_id]
         self.populate_compare_list()
-        self.set_page(2)
+        self.set_page(PAGE_SHARED_TIME)
         self.refresh_comparison()
 
     def populate_compare_list(self) -> None:
@@ -2327,8 +2339,8 @@ def run_ui_check(app: QApplication, window: MainWindow) -> int:
     def complete() -> None:
         if window.dashboard is None:
             return
-        if window.pages.currentIndex() != 4:
-            window.set_page(4)
+        if window.pages.currentIndex() != PAGE_FRIEND_MAP:
+            window.set_page(PAGE_FRIEND_MAP)
             return
         if window._friend_map_data is None:
             return
