@@ -35,7 +35,7 @@ No Python installation is needed for the packaged application.
 2. Under **Artifacts**, download `VRCX-Time-Together-windows-x64`.
 3. Extract the downloaded artifact ZIP. It contains both a standalone `.exe`
    and a portable application ZIP, plus SHA-256 checksums for each.
-4. Either run `VRCX-Time-Together-1.0.0-<commit>-windows-x64.exe` directly, or
+4. Either run `VRCX-Time-Together-1.1.0-<commit>-windows-x64.exe` directly, or
    extract the portable ZIP to a permanent folder and run
    `VRCX Time Together.exe`. Keep the portable build's `_internal` directory
    beside its executable.
@@ -155,8 +155,8 @@ manually. Pushing a tag matching the application version builds and tests both
 packages, creates SHA-256 checksums, and publishes them to a GitHub Release:
 
 ```powershell
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.1.0
+git push origin v1.1.0
 ```
 
 Before creating a later release, update both `vrc_time_together.__version__`
