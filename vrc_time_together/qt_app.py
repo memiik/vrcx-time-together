@@ -72,9 +72,11 @@ from .models import (
     DashboardData,
     FriendIdentity,
     FriendInsightsData,
+    FriendMapData,
     FriendStat,
 )
 from .qt_chart import TimeSeriesChart
+from .qt_friend_map import FriendMapWidget
 from .qt_insights import (
     CalendarHeatmap,
     CompanyContextChart,
@@ -550,12 +552,15 @@ class MainWindow(QMainWindow):
         self._dashboard_generation = 0
         self._comparison_generation = 0
         self._insights_generation = 0
+        self._map_generation = 0
         self._selected_friend_ids: list[str] = []
         self._selected_insight_friend_id: str | None = None
         self._current_friend_id: str | None = None
         self._friend_by_id: dict[str, FriendStat] = {}
         self._friend_option_by_id: dict[str, FriendIdentity] = {}
         self._friend_insights_data: FriendInsightsData | None = None
+        self._friend_map_data: FriendMapData | None = None
+        self._selected_map_friend_id: str | None = None
         self._settings = QSettings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION)
         self._dashboard_debounce = QTimer(self)
         self._dashboard_debounce.setSingleShot(True)
@@ -610,6 +615,7 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self._build_friends_page())
         self.pages.addWidget(self._build_compare_page())
         self.pages.addWidget(self._build_insights_page())
+        self.pages.addWidget(self._build_friend_map_page())
         main_layout.addWidget(self.pages, 1)
         root_layout.addWidget(main, 1)
         self.setCentralWidget(root)
@@ -647,6 +653,7 @@ class MainWindow(QMainWindow):
                 ("Friends", "Search and details"),
                 ("Compare", "Multi-friend analysis"),
                 ("Insights", "Selected-friend patterns"),
+                ("Friend map", "Interactive co-presence network"),
             )
         ):
             button = QPushButton(label)
@@ -762,6 +769,7 @@ class MainWindow(QMainWindow):
         self._dashboard_generation += 1
         self._comparison_generation += 1
         self._insights_generation += 1
+        self._map_generation += 1
         self.repository = candidate
         self.dashboard = None
         self._friend_by_id = {}
@@ -771,8 +779,11 @@ class MainWindow(QMainWindow):
         self._current_friend_id = None
         self._comparison_data = None
         self._friend_insights_data = None
+        self._friend_map_data = None
+        self._selected_map_friend_id = None
         self.clear_comparison()
         self.clear_friend_insights()
+        self.clear_friend_map()
         self.date_range_panel.set_earliest_date(earliest)
         self.db_label.setText(database_path.name)
         self.db_label.setToolTip(str(database_path))
@@ -1177,6 +1188,99 @@ class MainWindow(QMainWindow):
         layout.addWidget(scroll, 1)
         return page
 
+    def _build_friend_map_page(self) -> QWidget:
+        page, layout = self._page_container(
+            "Friend map",
+            "See who has been around you most and which current friends tend to overlap in the same recorded instance.",
+        )
+
+        controls = QFrame()
+        controls.setObjectName("Panel")
+        controls_layout = QVBoxLayout(controls)
+        controls_layout.setContentsMargins(14, 10, 14, 10)
+        controls_layout.setSpacing(8)
+        context_row = QHBoxLayout()
+        self.map_context = QLabel("Open the map to load this date range")
+        self.map_context.setObjectName("Muted")
+        context_row.addWidget(self.map_context, 1)
+        reset = QPushButton("Reset view")
+        reset.clicked.connect(lambda: self.friend_map.reset_view())
+        context_row.addWidget(reset)
+        controls_layout.addLayout(context_row)
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(10)
+        filter_row.addStretch(1)
+        node_label = QLabel("PEOPLE")
+        node_label.setObjectName("MetricLabel")
+        filter_row.addWidget(node_label)
+        self.map_node_limit = QComboBox()
+        self.map_node_limit.addItems(["Top 12", "Top 20", "Top 30", "Top 40"])
+        self.map_node_limit.setCurrentText("Top 20")
+        self.map_node_limit.currentTextChanged.connect(self.render_friend_map)
+        filter_row.addWidget(self.map_node_limit)
+        link_label = QLabel("DETAIL")
+        link_label.setObjectName("MetricLabel")
+        filter_row.addWidget(link_label)
+        self.map_connection_detail = QComboBox()
+        self.map_connection_detail.addItems(
+            ["Focused", "Balanced", "All connections"]
+        )
+        self.map_connection_detail.setToolTip(
+            "Focused shows the strongest useful links; Balanced adds more context; "
+            "All connections shows every measured overlap."
+        )
+        self.map_connection_detail.currentTextChanged.connect(self.render_friend_map)
+        filter_row.addWidget(self.map_connection_detail)
+        metric_label = QLabel("RELATIONSHIP")
+        metric_label.setObjectName("MetricLabel")
+        filter_row.addWidget(metric_label)
+        self.map_connection_metric = QComboBox()
+        self.map_connection_metric.addItems(
+            ["Time overlap", "Co-appearance likelihood"]
+        )
+        self.map_connection_metric.setToolTip(
+            "Time overlap favors total shared hours. Co-appearance likelihood "
+            "is overlap divided by the less-frequent friend's total time, so it "
+            "favors pairs who tend to be present at the same time."
+        )
+        self.map_connection_metric.currentTextChanged.connect(self.render_friend_map)
+        filter_row.addWidget(self.map_connection_metric)
+        controls_layout.addLayout(filter_row)
+        layout.addWidget(controls)
+
+        map_panel = QFrame()
+        map_panel.setObjectName("Panel")
+        map_layout = QVBoxLayout(map_panel)
+        map_layout.setContentsMargins(1, 1, 1, 1)
+        self.friend_map = FriendMapWidget()
+        self.friend_map.friend_selected.connect(self.show_map_friend)
+        self.friend_map.friend_activated.connect(self.open_map_friend_insights)
+        map_layout.addWidget(self.friend_map, 1)
+        layout.addWidget(map_panel, 1)
+
+        self.map_detail = QFrame()
+        self.map_detail.setObjectName("DetailStrip")
+        detail_layout = QHBoxLayout(self.map_detail)
+        detail_layout.setContentsMargins(14, 10, 14, 10)
+        detail_text = QVBoxLayout()
+        self.map_detail_title = QLabel("Select a friend node")
+        self.map_detail_title.setObjectName("SectionTitle")
+        detail_text.addWidget(self.map_detail_title)
+        self.map_detail_text = QLabel(
+            "Larger nodes spent more time around you; brighter links mean more same-instance overlap."
+        )
+        self.map_detail_text.setObjectName("Muted")
+        self.map_detail_text.setWordWrap(True)
+        detail_text.addWidget(self.map_detail_text)
+        detail_layout.addLayout(detail_text, 1)
+        self.map_insights_button = QPushButton("Open friend insights")
+        self.map_insights_button.setObjectName("PrimaryButton")
+        self.map_insights_button.setEnabled(False)
+        self.map_insights_button.clicked.connect(self.open_selected_map_friend_insights)
+        detail_layout.addWidget(self.map_insights_button)
+        layout.addWidget(self.map_detail)
+        return page
+
     def _connect_shortcuts(self) -> None:
         refresh = QAction(self)
         refresh.setShortcut(QKeySequence("F5"))
@@ -1190,7 +1294,9 @@ class MainWindow(QMainWindow):
         escape.setShortcut(QKeySequence("Escape"))
         escape.triggered.connect(self.clear_contextual_input)
         self.addAction(escape)
-        for index, key in enumerate(("Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4")):
+        for index, key in enumerate(
+            ("Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5")
+        ):
             action = QAction(self)
             action.setShortcut(QKeySequence(key))
             action.triggered.connect(lambda checked=False, value=index: self.set_page(value))
@@ -1199,11 +1305,15 @@ class MainWindow(QMainWindow):
     def set_page(self, index: int) -> None:
         self.pages.setCurrentIndex(index)
         self.nav_buttons[index].setChecked(True)
-        self.page_context.setText(("OVERVIEW", "FRIENDS", "COMPARE", "INSIGHTS")[index])
+        self.page_context.setText(
+            ("OVERVIEW", "FRIENDS", "COMPARE", "INSIGHTS", "FRIEND MAP")[index]
+        )
         if index == 1:
             QTimer.singleShot(0, self.friend_search.setFocus)
         elif index == 3:
             QTimer.singleShot(0, self.insight_friend.setFocus)
+        elif index == 4 and self.dashboard is not None and self._friend_map_data is None:
+            self.refresh_friend_map()
 
     def focus_search(self) -> None:
         if self.pages.currentIndex() == 2:
@@ -1211,6 +1321,8 @@ class MainWindow(QMainWindow):
         elif self.pages.currentIndex() == 3:
             self.insight_friend.setFocus()
             self.insight_friend.show_all_options()
+        elif self.pages.currentIndex() == 4:
+            return
         else:
             self.set_page(1)
             self.friend_search.setFocus()
@@ -1221,6 +1333,8 @@ class MainWindow(QMainWindow):
         elif self.pages.currentIndex() == 3:
             self.insight_calendar.clear_selection()
             self.insight_day_detail.setText("Select a day for its exact value")
+        elif self.pages.currentIndex() == 4:
+            self.friend_map.reset_view()
         elif self.pages.currentIndex() == 1:
             self.clear_friend_filters()
 
@@ -1308,6 +1422,9 @@ class MainWindow(QMainWindow):
         if self._selected_insight_friend_id:
             self._insights_generation += 1
             self._friend_insights_data = None
+        if self._friend_map_data is not None or self.pages.currentIndex() == 4:
+            self._map_generation += 1
+            self._friend_map_data = None
         self._dashboard_generation += 1
         generation = self._dashboard_generation
         self.set_loading(True, "Loading local VRCX activity…")
@@ -1351,6 +1468,8 @@ class MainWindow(QMainWindow):
             self.refresh_comparison()
         if self._selected_insight_friend_id:
             self.refresh_friend_insights()
+        if self.pages.currentIndex() == 4:
+            self.refresh_friend_map()
 
     def update_top_friends(self) -> None:
         while self.top_friends_layout.count():
@@ -1596,6 +1715,114 @@ class MainWindow(QMainWindow):
         self.insight_presence_chart.set_data(tuple(), 0, 0, "Time overlap")
         self.insight_day_detail.setText("Select a day for its exact value")
 
+    def refresh_friend_map(self) -> None:
+        state = self.collect_state()
+        self._map_generation += 1
+        generation = self._map_generation
+        self.set_loading(True, "Building the friend co-presence map…")
+        worker = RepositoryWorker(
+            generation,
+            lambda: self.repository.load_friend_map(state, max_nodes=40),
+        )
+        worker.signals.result.connect(self.friend_map_loaded)
+        worker.signals.error.connect(self.map_error)
+        worker.signals.finished.connect(self.release_worker)
+        self._workers.add(worker)
+        self.thread_pool.start(worker)
+
+    @Slot(int, object)
+    def friend_map_loaded(self, generation: int, result: object) -> None:
+        if generation != self._map_generation:
+            return
+        data = result
+        if not isinstance(data, FriendMapData):
+            return
+        self._friend_map_data = data
+        self.set_loading(False)
+        self.render_friend_map()
+        self.status_label.setText(
+            f"Friend map ready · {len(data.nodes)} active friends considered · "
+            f"{len(data.links)} same-instance connections"
+        )
+
+    def render_friend_map(self, _value: str = "") -> None:
+        data = self._friend_map_data
+        if data is None:
+            self.friend_map.set_data(FriendMapData(tuple(), tuple()))
+            return
+        limits = {"Top 12": 12, "Top 20": 20, "Top 30": 30, "Top 40": 40}
+        self.friend_map.set_data(
+            data,
+            node_limit=limits[self.map_node_limit.currentText()],
+            connection_detail=self.map_connection_detail.currentText(),
+            connection_metric=self.map_connection_metric.currentText(),
+        )
+        node_count, link_count = self.friend_map.visible_counts()
+        self.map_context.setText(
+            f"{node_count} friend{'s' if node_count != 1 else ''} · "
+            f"{link_count} {self.map_connection_detail.currentText().lower()} connection"
+            f"{'s' if link_count != 1 else ''} · "
+            f"weighted by {self.map_connection_metric.currentText().lower()}"
+        )
+        if self._selected_map_friend_id:
+            self.show_map_friend(self._selected_map_friend_id)
+
+    def show_map_friend(self, user_id: str) -> None:
+        data = self._friend_map_data
+        if data is None:
+            return
+        node = next((item for item in data.nodes if item.user_id == user_id), None)
+        if node is None:
+            return
+        self._selected_map_friend_id = user_id
+        visible_connections = self.friend_map.visible_connection_count(user_id)
+        strongest = self.friend_map.strongest_connection(user_id)
+        relationship = "No visible same-instance relationship"
+        if strongest is not None:
+            other_id, link = strongest
+            other = next(item for item in data.nodes if item.user_id == other_id)
+            if self.map_connection_metric.currentText() == "Co-appearance likelihood":
+                relationship = (
+                    f"most likely with <b>{other.display_name}</b> · "
+                    f"<b>{link.likelihood:.0%}</b> co-appearance likelihood"
+                )
+            else:
+                relationship = (
+                    f"strongest overlap with <b>{other.display_name}</b> · "
+                    f"<b>{format_duration(link.milliseconds)}</b>"
+                )
+        self.map_detail_title.setText(node.display_name)
+        self.map_detail_text.setText(
+            f"<b>{format_duration(node.milliseconds)}</b> around you across "
+            f"<b>{node.sessions}</b> sessions&nbsp;&nbsp; · &nbsp;&nbsp;"
+            f"{visible_connections} visible map connection"
+            f"{'s' if visible_connections != 1 else ''}&nbsp;&nbsp; · &nbsp;&nbsp;"
+            f"{relationship}"
+        )
+        self.map_insights_button.setEnabled(True)
+
+    def open_map_friend_insights(self, user_id: str) -> None:
+        self._selected_map_friend_id = user_id
+        self._current_friend_id = user_id
+        self.open_current_friend_insights()
+
+    def open_selected_map_friend_insights(self) -> None:
+        if self._selected_map_friend_id:
+            self.open_map_friend_insights(self._selected_map_friend_id)
+
+    def clear_friend_map(self) -> None:
+        self._friend_map_data = None
+        self._selected_map_friend_id = None
+        if not hasattr(self, "friend_map"):
+            return
+        self.friend_map.set_data(FriendMapData(tuple(), tuple()))
+        self.map_context.setText("Open the map to load this date range")
+        self.map_detail_title.setText("Select a friend node")
+        self.map_detail_text.setText(
+            "Larger nodes spent more time around you; brighter links mean more same-instance overlap."
+        )
+        self.map_insights_button.setEnabled(False)
+
     def show_friend_detail(self) -> None:
         rows = self.friends_table.selectionModel().selectedRows()
         if not rows:
@@ -1774,6 +2001,13 @@ class MainWindow(QMainWindow):
         self.set_loading(False)
         self.show_error(message)
 
+    @Slot(int, str, str)
+    def map_error(self, generation: int, message: str, _kind: str) -> None:
+        if generation != self._map_generation:
+            return
+        self.set_loading(False)
+        self.show_error(message)
+
     @Slot(object)
     def release_worker(self, worker: RepositoryWorker) -> None:
         self._workers.discard(worker)
@@ -1855,6 +2089,11 @@ def run_ui_check(app: QApplication, window: MainWindow) -> int:
 
     def complete() -> None:
         if window.dashboard is None:
+            return
+        if window.pages.currentIndex() != 4:
+            window.set_page(4)
+            return
+        if window._friend_map_data is None:
             return
         LOGGER.info("Packaged UI check completed successfully")
         poll.stop()

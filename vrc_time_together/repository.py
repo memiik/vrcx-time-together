@@ -7,6 +7,7 @@ import threading
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
+from itertools import combinations
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,9 @@ from .models import (
     DashboardData,
     FriendIdentity,
     FriendInsightsData,
+    FriendMapData,
+    FriendMapLink,
+    FriendMapNode,
     FriendStat,
 )
 from .timezone_utils import (
@@ -211,6 +215,31 @@ class VrcxRepository:
             raise VrcxDataError(
                 "The selected friend insights could not be read from VRCX. "
                 "Try again shortly."
+            ) from error
+        with self._lock:
+            self._cache[key] = result
+        return result
+
+    def load_friend_map(self, state: AppState, max_nodes: int = 40) -> FriendMapData:
+        signature = self._prepare_cache()
+        max_nodes = max(2, min(60, max_nodes))
+        key = (
+            "friend-map",
+            signature,
+            state.start_date,
+            state.end_date,
+            max_nodes,
+        )
+        with self._lock:
+            cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        try:
+            result = self._query_friend_map(state, max_nodes)
+        except sqlite3.Error as error:
+            LOGGER.exception("Friend map query failed")
+            raise VrcxDataError(
+                "The friend map could not be read from VRCX. Try again shortly."
             ) from error
         with self._lock:
             self._cache[key] = result
@@ -538,6 +567,198 @@ class VrcxRepository:
             context_encounters=tuple(context_encounters),
             co_presence=co_presence,
         )
+
+    def _query_friend_map(self, state: AppState, max_nodes: int) -> FriendMapData:
+        if state.end_date < state.start_date:
+            raise ValueError("The end date must be on or after the start date.")
+        range_start, range_end = local_range_utc(state.start_date, state.end_date)
+        with closing(open_database(self.database_path)) as connection:
+            friend_table = find_friend_table(connection)
+            parameters: dict[str, object] = {
+                "start_at": sqlite_timestamp(range_start),
+                "end_at": sqlite_timestamp(range_end),
+                "max_nodes": max_nodes,
+            }
+            clipped = """
+                MAX(0.0,
+                    (MIN(julianday(j.created_at), julianday(:end_at)) -
+                     MAX(julianday(j.created_at) - (j.time / 86400000.0),
+                         julianday(:start_at))) * 86400000.0)
+            """
+            stats = list(
+                connection.execute(
+                    f"""
+                    SELECT
+                        f.user_id,
+                        f.display_name,
+                        COUNT(*) AS sessions,
+                        CAST(ROUND(SUM({clipped})) AS INTEGER) AS milliseconds
+                    FROM gamelog_join_leave AS j
+                    JOIN {quote_identifier(friend_table)} AS f ON f.user_id = j.user_id
+                    WHERE j.type = 'OnPlayerLeft'
+                      AND j.time > 0
+                      AND julianday(j.created_at) > julianday(:start_at)
+                      AND julianday(j.created_at) - (j.time / 86400000.0)
+                            < julianday(:end_at)
+                    GROUP BY f.user_id, f.display_name
+                    HAVING milliseconds > 0
+                    ORDER BY milliseconds DESC, f.display_name COLLATE NOCASE
+                    LIMIT :max_nodes
+                    """,
+                    parameters,
+                )
+            )
+            if not stats:
+                return FriendMapData(tuple(), tuple())
+            placeholders: list[str] = []
+            for index, stat in enumerate(stats):
+                key = f"map_user_{index}"
+                parameters[key] = stat["user_id"]
+                placeholders.append(f":{key}")
+            rows = list(
+                connection.execute(
+                    f"""
+                    SELECT
+                        f.user_id,
+                        f.display_name,
+                        j.created_at,
+                        j.time,
+                        COALESCE(j.location, '') AS location
+                    FROM gamelog_join_leave AS j
+                    JOIN {quote_identifier(friend_table)} AS f ON f.user_id = j.user_id
+                    WHERE j.type = 'OnPlayerLeft'
+                      AND j.time > 0
+                      AND julianday(j.created_at) > julianday(:start_at)
+                      AND julianday(j.created_at) - (j.time / 86400000.0)
+                            < julianday(:end_at)
+                      AND f.user_id IN ({', '.join(placeholders)})
+                    ORDER BY j.created_at
+                    """,
+                    parameters,
+                )
+            )
+
+        intervals: list[_FriendInterval] = []
+        names = {row["user_id"]: row["display_name"] for row in stats}
+        for row in rows:
+            event_end = parse_utc(row["created_at"])
+            if event_end is None:
+                continue
+            event_start = event_end - timedelta(milliseconds=row["time"])
+            clipped_start = max(event_start, range_start)
+            clipped_end = min(event_end, range_end)
+            if clipped_start >= clipped_end:
+                continue
+            intervals.append(
+                _FriendInterval(
+                    user_id=row["user_id"],
+                    display_name=row["display_name"],
+                    start=clipped_start,
+                    end=clipped_end,
+                    location=row["location"],
+                )
+            )
+
+        nodes = tuple(
+            FriendMapNode(
+                user_id=row["user_id"],
+                display_name=row["display_name"],
+                milliseconds=row["milliseconds"],
+                sessions=row["sessions"],
+            )
+            for row in stats
+        )
+
+        grouped: dict[str, dict[str, list[tuple[datetime, datetime]]]] = {}
+        for interval in intervals:
+            if not interval.location:
+                continue
+            grouped.setdefault(interval.location, {}).setdefault(
+                interval.user_id, []
+            ).append((interval.start, interval.end))
+
+        overlap_totals: dict[tuple[str, str], int] = {}
+        overlap_encounters: dict[tuple[str, str], int] = {}
+        for users in grouped.values():
+            merged_by_user = {
+                user_id: self._merge_intervals(user_intervals)
+                for user_id, user_intervals in users.items()
+            }
+            for first_id, second_id in combinations(sorted(merged_by_user), 2):
+                milliseconds, encounters = self._measure_overlap(
+                    merged_by_user[first_id], merged_by_user[second_id]
+                )
+                if milliseconds <= 0:
+                    continue
+                key = (first_id, second_id)
+                overlap_totals[key] = overlap_totals.get(key, 0) + milliseconds
+                overlap_encounters[key] = overlap_encounters.get(key, 0) + encounters
+
+        node_milliseconds = {node.user_id: node.milliseconds for node in nodes}
+        links = tuple(
+            sorted(
+                (
+                    FriendMapLink(
+                        source_user_id=source_id,
+                        target_user_id=target_id,
+                        milliseconds=milliseconds,
+                        encounters=overlap_encounters[(source_id, target_id)],
+                        likelihood=min(
+                            1.0,
+                            milliseconds
+                            / min(
+                                node_milliseconds[source_id],
+                                node_milliseconds[target_id],
+                            ),
+                        ),
+                    )
+                    for (source_id, target_id), milliseconds in overlap_totals.items()
+                ),
+                key=lambda link: (
+                    -link.milliseconds,
+                    names[link.source_user_id].casefold(),
+                    names[link.target_user_id].casefold(),
+                ),
+            )
+        )
+        return FriendMapData(nodes=nodes, links=links)
+
+    @staticmethod
+    def _merge_intervals(
+        intervals: list[tuple[datetime, datetime]],
+    ) -> list[tuple[datetime, datetime]]:
+        merged: list[tuple[datetime, datetime]] = []
+        for start, end in sorted(intervals):
+            if not merged or start > merged[-1][1]:
+                merged.append((start, end))
+                continue
+            if end > merged[-1][1]:
+                merged[-1] = (merged[-1][0], end)
+        return merged
+
+    @staticmethod
+    def _measure_overlap(
+        first: list[tuple[datetime, datetime]],
+        second: list[tuple[datetime, datetime]],
+    ) -> tuple[int, int]:
+        milliseconds = 0
+        encounters = 0
+        first_index = second_index = 0
+        while first_index < len(first) and second_index < len(second):
+            first_start, first_end = first[first_index]
+            second_start, second_end = second[second_index]
+            overlap_start = max(first_start, second_start)
+            overlap_end = min(first_end, second_end)
+            if overlap_start < overlap_end:
+                milliseconds += round(
+                    (overlap_end - overlap_start).total_seconds() * 1000
+                )
+                encounters += 1
+            if first_end <= second_end:
+                first_index += 1
+            else:
+                second_index += 1
+        return milliseconds, encounters
 
     def _load_local_daily_series(
         self,

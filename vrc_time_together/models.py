@@ -25,6 +25,29 @@ class FriendIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class FriendMapNode:
+    user_id: str
+    display_name: str
+    milliseconds: int
+    sessions: int
+
+
+@dataclass(frozen=True, slots=True)
+class FriendMapLink:
+    source_user_id: str
+    target_user_id: str
+    milliseconds: int
+    encounters: int
+    likelihood: float
+
+
+@dataclass(frozen=True, slots=True)
+class FriendMapData:
+    nodes: tuple[FriendMapNode, ...]
+    links: tuple[FriendMapLink, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class DashboardData:
     friends: tuple[FriendStat, ...]
     friend_options: tuple[FriendIdentity, ...]

@@ -182,6 +182,30 @@ class RepositoryTests(unittest.TestCase):
             ["Beta", "Alpha", "Inactive"],
         )
 
+    def test_friend_map_ranks_presence_and_measures_same_instance_overlap(self) -> None:
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            connection.execute(
+                "UPDATE gamelog_join_leave SET location = 'wrld_shared:1'"
+            )
+            connection.commit()
+        data = VrcxRepository(self.database_path).load_friend_map(
+            AppState(self.local_day, self.local_day)
+        )
+
+        self.assertEqual([node.display_name for node in data.nodes], ["Alpha", "Beta"])
+        self.assertEqual(data.nodes[0].milliseconds, 2 * 3_600_000)
+        self.assertEqual(len(data.links), 1)
+        self.assertEqual(data.links[0].milliseconds, 3_600_000)
+        self.assertEqual(data.links[0].encounters, 1)
+        self.assertEqual(data.links[0].likelihood, 0.5)
+
+    def test_friend_map_does_not_infer_connections_without_location(self) -> None:
+        data = VrcxRepository(self.database_path).load_friend_map(
+            AppState(self.local_day, self.local_day)
+        )
+        self.assertEqual(len(data.nodes), 2)
+        self.assertEqual(data.links, tuple())
+
     def test_local_day_boundaries_cover_one_real_calendar_day(self) -> None:
         start, end = local_range_utc(self.local_day, self.local_day)
         self.assertEqual((end - start).total_seconds(), 24 * 60 * 60)
