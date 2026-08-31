@@ -126,6 +126,7 @@ class SegmentedControl(QWidget):
 class TopFriendsBarChart(QWidget):
     friend_selected = Signal(str)
     friend_activated = Signal(str)
+    friend_hovered = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -230,21 +231,20 @@ class TopFriendsBarChart(QWidget):
         hovered_id = hovered.user_id if hovered else None
         if hovered_id != self._hovered_id:
             self._hovered_id = hovered_id
+            self.friend_hovered.emit(
+                (
+                    f"{hovered.display_name} · "
+                    f"{hovered.sessions} session"
+                    f"{'s' if hovered.sessions != 1 else ''}"
+                )
+                if hovered is not None
+                else ""
+            )
             self.update()
-        if hovered is None:
-            QToolTip.hideText()
-            return
-        QToolTip.showText(
-            event.globalPosition().toPoint(),
-            f"<b>{hovered.display_name}</b><br>"
-            f"{format_duration(hovered.milliseconds)} around you · "
-            f"{hovered.sessions} sessions<br>Double-click to open Insights",
-            self,
-        )
 
     def leaveEvent(self, _event) -> None:  # noqa: N802 - Qt API
         self._hovered_id = None
-        QToolTip.hideText()
+        self.friend_hovered.emit("")
         self.update()
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt API
@@ -267,6 +267,7 @@ class TopFriendsBarChart(QWidget):
 class FriendMapWidget(QWidget):
     friend_selected = Signal(str)
     friend_activated = Signal(str)
+    group_selected = Signal(int)
     selection_cleared = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -278,10 +279,13 @@ class FriendMapWidget(QWidget):
         self._groups: dict[str, int] = {}
         self._positions: dict[str, QPointF] = {}
         self._node_rects: dict[str, QRectF] = {}
+        self._group_rects: dict[int, QRectF] = {}
         self._edge_segments: list[tuple[QPointF, QPointF, FriendMapLink]] = []
         self._hovered_id: str | None = None
         self._hovered_link: FriendMapLink | None = None
+        self._hovered_group = 0
         self._selected_id: str | None = None
+        self._selected_group = 0
         self._connection_metric = "Time overlap"
         self._color_mode = "Activity"
         self._zoom = 1.0
@@ -317,6 +321,11 @@ class FriendMapWidget(QWidget):
             if color_mode == "Friend groups"
             else {node.user_id: 0 for node in self._nodes}
         )
+        if (
+            color_mode != "Friend groups"
+            or self._selected_group not in self._groups.values()
+        ):
+            self._selected_group = 0
         candidates = sorted(
             self._measured_links,
             key=lambda link: -self._link_value(link),
@@ -388,6 +397,30 @@ class FriendMapWidget(QWidget):
 
     def group_for(self, user_id: str) -> int:
         return self._groups.get(user_id, 0)
+
+    def group_members(self, group_id: int) -> tuple[FriendMapNode, ...]:
+        if group_id <= 0:
+            return self._nodes
+        return tuple(
+            node
+            for node in self._nodes
+            if self._groups.get(node.user_id, 0) == group_id
+        )
+
+    def set_selected_group(self, group_id: int) -> None:
+        available = {value for value in self._groups.values() if value > 0}
+        selected = group_id if group_id in available else 0
+        if selected == self._selected_group:
+            return
+        self._selected_group = selected
+        if selected and self._selected_id not in {
+            node.user_id for node in self.group_members(selected)
+        }:
+            self._selected_id = None
+        self.update()
+
+    def selected_group(self) -> int:
+        return self._selected_group
 
     def node_colors(self) -> dict[str, QColor]:
         return {
@@ -479,7 +512,8 @@ class FriendMapWidget(QWidget):
             return
         golden_angle = math.pi * (3 - math.sqrt(5))
         anchors: dict[str, QPointF] = {}
-        if self._color_mode == "Friend groups" and self.group_count():
+        ungrouped_ids: set[str] = set()
+        if self._color_mode == "Friend groups":
             grouped_nodes: dict[int, list[FriendMapNode]] = {}
             for node in self._nodes:
                 grouped_nodes.setdefault(
@@ -507,11 +541,29 @@ class FriendMapWidget(QWidget):
                     )
                     anchors[node.user_id] = anchor
                     self._positions[node.user_id] = QPointF(anchor)
-            for index, node in enumerate(grouped_nodes.get(0, [])):
-                angle = index * golden_angle - math.pi / 2
-                anchor = QPointF(math.cos(angle) * 0.82, math.sin(angle) * 0.82)
-                anchors[node.user_id] = anchor
-                self._positions[node.user_id] = QPointF(anchor)
+            ungrouped = grouped_nodes.get(0, [])
+            ungrouped_ids = {node.user_id for node in ungrouped}
+            maximum_per_orbit = 28
+            orbit_count = max(1, math.ceil(len(ungrouped) / maximum_per_orbit))
+            orbit_sizes = [
+                len(ungrouped) // orbit_count
+                + (1 if orbit < len(ungrouped) % orbit_count else 0)
+                for orbit in range(orbit_count)
+            ]
+            node_index = 0
+            for orbit, orbit_size in enumerate(orbit_sizes):
+                radius = max(0.68, 0.88 - orbit * 0.10)
+                phase = -math.pi / 2 + orbit * (math.pi / max(orbit_size, 1))
+                for slot in range(orbit_size):
+                    node = ungrouped[node_index]
+                    node_index += 1
+                    angle = phase + slot * 2 * math.pi / orbit_size
+                    anchor = QPointF(
+                        math.cos(angle) * radius,
+                        math.sin(angle) * radius,
+                    )
+                    anchors[node.user_id] = anchor
+                    self._positions[node.user_id] = QPointF(anchor)
         else:
             for index, node in enumerate(self._nodes):
                 radius = 0.34 + 0.48 * math.sqrt((index + 0.5) / count)
@@ -564,6 +616,13 @@ class FriendMapWidget(QWidget):
                     and self._groups.get(link.source_user_id)
                     == self._groups.get(link.target_user_id)
                 )
+                involves_ungrouped = (
+                    self._color_mode == "Friend groups"
+                    and (
+                        link.source_user_id in ungrouped_ids
+                        or link.target_user_id in ungrouped_ids
+                    )
+                )
                 target = (
                     0.22 + (1.0 - strength) * 0.12
                     if same_group
@@ -574,6 +633,8 @@ class FriendMapWidget(QWidget):
                     if same_group
                     else 0.005 + strength * 0.009
                 )
+                if involves_ungrouped:
+                    attraction *= 0.16
                 forces[link.source_user_id] -= direction * attraction
                 forces[link.target_user_id] += direction * attraction
 
@@ -581,7 +642,13 @@ class FriendMapWidget(QWidget):
                 position = self._positions[node.user_id]
                 forces[node.user_id] += (
                     anchors[node.user_id] - position
-                ) * (0.075 if self._color_mode == "Friend groups" else 0.030)
+                ) * (
+                    0.22
+                    if node.user_id in ungrouped_ids
+                    else 0.075
+                    if self._color_mode == "Friend groups"
+                    else 0.030
+                )
 
             for node in self._nodes:
                 position = self._positions[node.user_id] + forces[node.user_id]
@@ -591,6 +658,11 @@ class FriendMapWidget(QWidget):
                 elif distance > 0.88:
                     position *= 0.88 / distance
                 self._positions[node.user_id] = position
+
+        for user_id in ungrouped_ids:
+            self._positions[user_id] = (
+                self._positions[user_id] * 0.12 + anchors[user_id] * 0.88
+            )
 
     def _screen_point(self, position: QPointF) -> QPointF:
         center = QPointF(self.width() / 2, (self.height() - 40) / 2) + self._pan
@@ -633,6 +705,7 @@ class FriendMapWidget(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(), QColor(SURFACE))
         self._node_rects = {}
+        self._group_rects = {}
         self._edge_segments = []
         if not self._nodes:
             painter.setPen(QColor(TEXT_MUTED))
@@ -676,20 +749,33 @@ class FriendMapWidget(QWidget):
                 for rect in member_rects[1:]:
                     bounds = bounds.united(rect)
                 bounds = bounds.adjusted(-22, -28, 22, 22)
+                self._group_rects[group_id] = bounds
                 group_color = friend_group_color(group_id)
+                selected_group = group_id == self._selected_group
+                emphasized_group = selected_group or group_id == self._hovered_group
+                subdued_group = bool(self._selected_group and not selected_group)
                 fill = QColor(group_color)
-                fill.setAlpha(13)
+                fill.setAlpha(5 if subdued_group else 28 if emphasized_group else 13)
                 border = QColor(group_color)
-                border.setAlpha(58)
-                painter.setPen(QPen(border, 1.0))
+                border.setAlpha(
+                    24 if subdued_group else 190 if emphasized_group else 58
+                )
+                painter.setPen(QPen(border, 2.0 if emphasized_group else 1.0))
                 painter.setBrush(fill)
                 painter.drawRoundedRect(bounds, 22, 22)
-                painter.setPen(group_color)
+                label_color = QColor(group_color)
+                if subdued_group:
+                    label_color.setAlpha(46)
+                painter.setPen(label_color)
                 painter.drawText(
                     bounds.adjusted(10, 4, -10, -4),
                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
-                    f"GROUP {group_id}",
+                    f"GROUP {group_id}"
+                    + (" · FOCUSED" if selected_group else " · CLICK TO EXPLORE"),
                 )
+        active_group_ids = {
+            node.user_id for node in self.group_members(self._selected_group)
+        } if self._selected_group else set()
         focused_id = self._selected_id or self._hovered_id
         focused_ids: set[str] = set()
         if focused_id:
@@ -726,7 +812,14 @@ class FriendMapWidget(QWidget):
                 if focused_id
                 else self._hovered_link == link
             )
-            if focused_ids and not connected:
+            inside_active_group = not active_group_ids or (
+                link.source_user_id in active_group_ids
+                and link.target_user_id in active_group_ids
+            )
+            if not inside_active_group:
+                color.setAlpha(4)
+                width = 0.45
+            elif focused_ids and not connected:
                 color.setAlpha(7 if self._selected_id else 16)
                 width = 0.55
             else:
@@ -769,12 +862,17 @@ class FriendMapWidget(QWidget):
             selected = node.user_id == self._selected_id
             hovered = node.user_id == self._hovered_id
             connected = not focused_ids or node.user_id in focused_ids
+            inside_active_group = (
+                not active_group_ids or node.user_id in active_group_ids
+            )
             radius = radii[node.user_id] * (1.10 if hovered else 1.0)
             node_rect = self._node_rects[node.user_id]
             color = self._node_color(index, node)
             if hovered:
                 color = color.lighter(120)
-            if not connected:
+            if not inside_active_group:
+                color.setAlpha(25)
+            elif not connected:
                 color.setAlpha(48 if self._selected_id else 85)
             halo = QColor(color)
             halo.setAlpha(70 if selected else 32 if connected else 8)
@@ -818,7 +916,24 @@ class FriendMapWidget(QWidget):
             selected = node.user_id == self._selected_id
             hovered = node.user_id == self._hovered_id
             connected = not focused_ids or node.user_id in focused_ids
-            if index >= 12 and not selected and not hovered:
+            inside_active_group = (
+                not active_group_ids or node.user_id in active_group_ids
+            )
+            group_rank = (
+                sum(
+                    1
+                    for previous in self._nodes[:index]
+                    if previous.user_id in active_group_ids
+                )
+                if active_group_ids
+                else index
+            )
+            label_limit = 24 if active_group_ids else 12
+            if (
+                (not inside_active_group or group_rank >= label_limit)
+                and not selected
+                and not hovered
+            ):
                 continue
             point = points[node.user_id]
             radius = radii[node.user_id]
@@ -860,6 +975,14 @@ class FriendMapWidget(QWidget):
                 return user_id
         return None
 
+    def _group_at(self, position: QPointF) -> int:
+        matches = [
+            (rect.width() * rect.height(), group_id)
+            for group_id, rect in self._group_rects.items()
+            if rect.contains(position)
+        ]
+        return min(matches, default=(0.0, 0))[1]
+
     def _link_at(self, position: QPointF) -> FriendMapLink | None:
         closest: tuple[float, FriendMapLink] | None = None
         for start, end, link in self._edge_segments:
@@ -891,10 +1014,36 @@ class FriendMapWidget(QWidget):
             return
         hovered = self._node_at(event.position())
         hovered_link = None if hovered else self._link_at(event.position())
-        if hovered != self._hovered_id or hovered_link != self._hovered_link:
+        hovered_group = (
+            self._group_at(event.position())
+            if hovered is None and hovered_link is None
+            else 0
+        )
+        if (
+            hovered != self._hovered_id
+            or hovered_link != self._hovered_link
+            or hovered_group != self._hovered_group
+        ):
             self._hovered_id = hovered
             self._hovered_link = hovered_link
+            self._hovered_group = hovered_group
+            self.setCursor(
+                Qt.CursorShape.PointingHandCursor
+                if hovered_group
+                else Qt.CursorShape.OpenHandCursor
+            )
             self.update()
+        if hovered_group:
+            members = self.group_members(hovered_group)
+            total_time = sum(node.milliseconds for node in members)
+            QToolTip.showText(
+                event.globalPosition().toPoint(),
+                f"<b>Group {hovered_group}</b><br>"
+                f"{len(members)} people · {format_duration(total_time)} combined time"
+                "<br>Click to explore this group",
+                self,
+            )
+            return
         if hovered is None and hovered_link is None:
             QToolTip.hideText()
             return
@@ -946,6 +1095,7 @@ class FriendMapWidget(QWidget):
     def leaveEvent(self, _event) -> None:  # noqa: N802 - Qt API
         self._hovered_id = None
         self._hovered_link = None
+        self._hovered_group = 0
         QToolTip.hideText()
         self.update()
 
@@ -967,6 +1117,9 @@ class FriendMapWidget(QWidget):
         if selected is not None:
             self.friend_selected.emit(selected)
         else:
+            group_id = self._group_at(event.position())
+            self._selected_group = group_id
+            self.group_selected.emit(group_id)
             self.selection_cleared.emit()
         self.update()
 
