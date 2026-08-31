@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .friend_groups import detect_friend_groups, same_instance_strength
 from .formatting import format_duration
 from .models import FriendMapData, FriendMapLink, FriendMapNode
 from .qt_theme import (
@@ -30,6 +31,17 @@ ACTIVITY_RANK_COLORS = (
     QColor("#5b9cf6"),  # 11–20
     QColor("#65b98a"),  # 21+
 )
+FRIEND_GROUP_COLORS = (
+    QColor("#a78bfa"),
+    QColor("#55c7d8"),
+    QColor("#f0b35a"),
+    QColor("#65b98a"),
+    QColor("#e879b7"),
+    QColor("#5b9cf6"),
+    QColor("#e98263"),
+    QColor("#9ac65d"),
+)
+UNGROUPED_COLOR = QColor("#778394")
 
 
 def activity_rank_color(rank: int) -> QColor:
@@ -53,6 +65,12 @@ def activity_rank_legend_html() -> str:
         f'<span style="color:{color.name()}">●</span> {label}'
         for color, label in entries
     )
+
+
+def friend_group_color(group_id: int) -> QColor:
+    if group_id <= 0:
+        return QColor(UNGROUPED_COLOR)
+    return QColor(FRIEND_GROUP_COLORS[(group_id - 1) % len(FRIEND_GROUP_COLORS)])
 
 
 class SegmentedControl(QWidget):
@@ -112,18 +130,23 @@ class TopFriendsBarChart(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._nodes: tuple[FriendMapNode, ...] = tuple()
+        self._node_colors: dict[str, QColor] = {}
         self._rows: list[tuple[QRectF, FriendMapNode]] = []
         self._hovered_id: str | None = None
         self._selected_id: str | None = None
         self.setMouseTracking(True)
-        self.setMinimumSize(220, 180)
+        self.setMinimumSize(0, 180)
 
     def set_nodes(
         self,
         nodes: tuple[FriendMapNode, ...],
         limit: int | None = None,
+        colors: dict[str, QColor] | None = None,
     ) -> None:
         self._nodes = nodes if limit is None else nodes[:limit]
+        self._node_colors = {
+            user_id: QColor(color) for user_id, color in (colors or {}).items()
+        }
         self.setMinimumHeight(max(180, 8 + len(self._nodes) * 36))
         if self._selected_id not in {node.user_id for node in self._nodes}:
             self._selected_id = None
@@ -185,7 +208,9 @@ class TopFriendsBarChart(QWidget):
                 track.width() * math.sqrt(node.milliseconds / maximum),
                 track.height(),
             )
-            fill_color = activity_rank_color(index + 1)
+            fill_color = QColor(
+                self._node_colors.get(node.user_id, activity_rank_color(index + 1))
+            )
             if hovered:
                 fill_color = fill_color.lighter(120)
             painter.setBrush(fill_color)
@@ -249,6 +274,8 @@ class FriendMapWidget(QWidget):
         self._data = FriendMapData(tuple(), tuple())
         self._nodes: tuple[FriendMapNode, ...] = tuple()
         self._links: tuple[FriendMapLink, ...] = tuple()
+        self._measured_links: tuple[FriendMapLink, ...] = tuple()
+        self._groups: dict[str, int] = {}
         self._positions: dict[str, QPointF] = {}
         self._node_rects: dict[str, QRectF] = {}
         self._edge_segments: list[tuple[QPointF, QPointF, FriendMapLink]] = []
@@ -256,6 +283,7 @@ class FriendMapWidget(QWidget):
         self._hovered_link: FriendMapLink | None = None
         self._selected_id: str | None = None
         self._connection_metric = "Time overlap"
+        self._color_mode = "Activity"
         self._zoom = 1.0
         self._pan = QPointF()
         self._drag_origin: QPointF | None = None
@@ -267,21 +295,30 @@ class FriendMapWidget(QWidget):
     def set_data(
         self,
         data: FriendMapData,
-        node_limit: int = 20,
+        node_limit: int | None = 20,
         connection_detail: str = "Focused",
         connection_metric: str = "Time overlap",
+        color_mode: str = "Activity",
     ) -> None:
         self._data = data
         self._connection_metric = connection_metric
-        visible_ids = {node.user_id for node in data.nodes[:node_limit]}
+        self._color_mode = color_mode
+        visible_nodes = data.nodes if node_limit is None else data.nodes[:node_limit]
+        visible_ids = {node.user_id for node in visible_nodes}
         self._nodes = tuple(node for node in data.nodes if node.user_id in visible_ids)
-        candidates = sorted(
-            (
+        self._measured_links = tuple(
             link
             for link in data.links
             if link.source_user_id in visible_ids
             and link.target_user_id in visible_ids
-            ),
+        )
+        self._groups = (
+            detect_friend_groups(self._nodes, self._measured_links)
+            if color_mode == "Friend groups"
+            else {node.user_id: 0 for node in self._nodes}
+        )
+        candidates = sorted(
+            self._measured_links,
             key=lambda link: -self._link_value(link),
         )
         if connection_detail == "Focused" and candidates:
@@ -346,6 +383,30 @@ class FriendMapWidget(QWidget):
     def visible_nodes(self) -> tuple[FriendMapNode, ...]:
         return self._nodes
 
+    def group_count(self) -> int:
+        return len({group_id for group_id in self._groups.values() if group_id > 0})
+
+    def group_for(self, user_id: str) -> int:
+        return self._groups.get(user_id, 0)
+
+    def node_colors(self) -> dict[str, QColor]:
+        return {
+            node.user_id: self._node_color(index, node)
+            for index, node in enumerate(self._nodes)
+        }
+
+    def group_legend_html(self) -> str:
+        entries = [
+            f'<span style="color:{friend_group_color(group_id).name()}">●</span> '
+            f"Group {group_id}"
+            for group_id in range(1, self.group_count() + 1)
+        ]
+        if any(group_id == 0 for group_id in self._groups.values()):
+            entries.append(
+                f'<span style="color:{UNGROUPED_COLOR.name()}">●</span> Unclustered'
+            )
+        return " &nbsp; ".join(entries)
+
     def measured_connection_count(self) -> int:
         visible_ids = {node.user_id for node in self._nodes}
         return sum(
@@ -396,6 +457,16 @@ class FriendMapWidget(QWidget):
             else float(link.milliseconds)
         )
 
+    def _layout_link_value(self, link: FriendMapLink) -> float:
+        if self._color_mode == "Friend groups":
+            return same_instance_strength(link)
+        return self._link_value(link)
+
+    def _node_color(self, index: int, node: FriendMapNode) -> QColor:
+        if self._color_mode == "Friend groups":
+            return friend_group_color(self._groups.get(node.user_id, 0))
+        return activity_rank_color(index + 1)
+
     def reset_view(self) -> None:
         self._zoom = 1.0
         self._pan = QPointF()
@@ -408,48 +479,109 @@ class FriendMapWidget(QWidget):
             return
         golden_angle = math.pi * (3 - math.sqrt(5))
         anchors: dict[str, QPointF] = {}
-        for index, node in enumerate(self._nodes):
-            radius = 0.50 + ((index * 7) % 5) * 0.07
-            angle = index * golden_angle - math.pi / 2
-            anchor = QPointF(
-                math.cos(angle) * radius,
-                math.sin(angle) * radius,
-            )
-            anchors[node.user_id] = anchor
-            self._positions[node.user_id] = QPointF(anchor)
+        if self._color_mode == "Friend groups" and self.group_count():
+            grouped_nodes: dict[int, list[FriendMapNode]] = {}
+            for node in self._nodes:
+                grouped_nodes.setdefault(
+                    self._groups.get(node.user_id, 0), []
+                ).append(node)
+            group_ids = sorted(group_id for group_id in grouped_nodes if group_id > 0)
+            group_centers = {
+                group_id: QPointF(
+                    math.cos(index * 2 * math.pi / len(group_ids) - math.pi / 2)
+                    * 0.58,
+                    math.sin(index * 2 * math.pi / len(group_ids) - math.pi / 2)
+                    * 0.58,
+                )
+                for index, group_id in enumerate(group_ids)
+            }
+            for group_id in group_ids:
+                members = grouped_nodes[group_id]
+                center = group_centers[group_id]
+                for member_index, node in enumerate(members):
+                    local_radius = min(0.34, 0.045 * math.sqrt(member_index + 1))
+                    local_angle = member_index * golden_angle
+                    anchor = center + QPointF(
+                        math.cos(local_angle) * local_radius,
+                        math.sin(local_angle) * local_radius,
+                    )
+                    anchors[node.user_id] = anchor
+                    self._positions[node.user_id] = QPointF(anchor)
+            for index, node in enumerate(grouped_nodes.get(0, [])):
+                angle = index * golden_angle - math.pi / 2
+                anchor = QPointF(math.cos(angle) * 0.82, math.sin(angle) * 0.82)
+                anchors[node.user_id] = anchor
+                self._positions[node.user_id] = QPointF(anchor)
+        else:
+            for index, node in enumerate(self._nodes):
+                radius = 0.34 + 0.48 * math.sqrt((index + 0.5) / count)
+                angle = index * golden_angle - math.pi / 2
+                anchor = QPointF(
+                    math.cos(angle) * radius,
+                    math.sin(angle) * radius,
+                )
+                anchors[node.user_id] = anchor
+                self._positions[node.user_id] = QPointF(anchor)
 
-        link_lookup = {
-            tuple(sorted((link.source_user_id, link.target_user_id))): link
-            for link in self._links
-        }
-        maximum_link = max((self._link_value(link) for link in self._links), default=1)
-        for _iteration in range(110):
+        layout_links = (
+            self._measured_links
+            if self._color_mode == "Friend groups"
+            else self._links
+        )
+        maximum_link = max(
+            (self._layout_link_value(link) for link in layout_links), default=1
+        )
+        iterations = 110 if count <= 60 else 44
+        exact_repulsion = count <= 72
+        repulsion_scale = min(1.0, 34 / count)
+        if self._color_mode == "Friend groups":
+            repulsion_scale *= 0.38
+        for _iteration in range(iterations):
             forces = {node.user_id: QPointF() for node in self._nodes}
-            for first_index, first in enumerate(self._nodes):
-                first_position = self._positions[first.user_id]
-                for second in self._nodes[first_index + 1 :]:
-                    second_position = self._positions[second.user_id]
-                    delta = first_position - second_position
-                    distance_squared = max(0.015, delta.x() ** 2 + delta.y() ** 2)
-                    distance = math.sqrt(distance_squared)
-                    repulsion = 0.0048 / distance_squared
-                    direction = delta / distance
-                    forces[first.user_id] += direction * repulsion
-                    forces[second.user_id] -= direction * repulsion
+            if exact_repulsion:
+                for first_index, first in enumerate(self._nodes):
+                    first_position = self._positions[first.user_id]
+                    for second in self._nodes[first_index + 1 :]:
+                        second_position = self._positions[second.user_id]
+                        delta = first_position - second_position
+                        distance_squared = max(0.015, delta.x() ** 2 + delta.y() ** 2)
+                        distance = math.sqrt(distance_squared)
+                        repulsion = 0.0048 * repulsion_scale / distance_squared
+                        direction = delta / distance
+                        forces[first.user_id] += direction * repulsion
+                        forces[second.user_id] -= direction * repulsion
 
-                    link = link_lookup.get(tuple(sorted((first.user_id, second.user_id))))
-                    if link is not None:
-                        strength = math.sqrt(self._link_value(link) / maximum_link)
-                        target = 0.34 + (1.0 - strength) * 0.18
-                        attraction = (distance - target) * (0.007 + strength * 0.011)
-                        forces[first.user_id] -= direction * attraction
-                        forces[second.user_id] += direction * attraction
+            for link in layout_links:
+                first_position = self._positions[link.source_user_id]
+                second_position = self._positions[link.target_user_id]
+                delta = first_position - second_position
+                distance = max(0.001, math.hypot(delta.x(), delta.y()))
+                direction = delta / distance
+                strength = math.sqrt(self._layout_link_value(link) / maximum_link)
+                same_group = (
+                    self._color_mode == "Friend groups"
+                    and self._groups.get(link.source_user_id, 0) > 0
+                    and self._groups.get(link.source_user_id)
+                    == self._groups.get(link.target_user_id)
+                )
+                target = (
+                    0.22 + (1.0 - strength) * 0.12
+                    if same_group
+                    else 0.42 + (1.0 - strength) * 0.16
+                )
+                attraction = (distance - target) * (
+                    0.010 + strength * 0.016
+                    if same_group
+                    else 0.005 + strength * 0.009
+                )
+                forces[link.source_user_id] -= direction * attraction
+                forces[link.target_user_id] += direction * attraction
 
             for node in self._nodes:
                 position = self._positions[node.user_id]
                 forces[node.user_id] += (
                     anchors[node.user_id] - position
-                ) * 0.030
+                ) * (0.075 if self._color_mode == "Friend groups" else 0.030)
 
             for node in self._nodes:
                 position = self._positions[node.user_id] + forces[node.user_id]
@@ -476,7 +608,11 @@ class FriendMapWidget(QWidget):
 
     def _node_radius(self, node: FriendMapNode) -> float:
         maximum = max((item.milliseconds for item in self._nodes), default=1)
-        if len(self._nodes) > 30:
+        if len(self._nodes) > 150:
+            minimum, maximum_radius = 3.5, 9.0
+        elif len(self._nodes) > 80:
+            minimum, maximum_radius = 4.5, 11.0
+        elif len(self._nodes) > 30:
             minimum, maximum_radius = 8.0, 18.0
         elif len(self._nodes) > 20:
             minimum, maximum_radius = 9.0, 21.0
@@ -523,6 +659,37 @@ class FriendMapWidget(QWidget):
             )
             for node in self._nodes
         }
+        if self._color_mode == "Friend groups":
+            group_font = QFont(painter.font())
+            group_font.setPointSize(7)
+            group_font.setBold(True)
+            painter.setFont(group_font)
+            for group_id in range(1, self.group_count() + 1):
+                member_rects = [
+                    self._node_rects[node.user_id]
+                    for node in self._nodes
+                    if self._groups.get(node.user_id) == group_id
+                ]
+                if not member_rects:
+                    continue
+                bounds = QRectF(member_rects[0])
+                for rect in member_rects[1:]:
+                    bounds = bounds.united(rect)
+                bounds = bounds.adjusted(-22, -28, 22, 22)
+                group_color = friend_group_color(group_id)
+                fill = QColor(group_color)
+                fill.setAlpha(13)
+                border = QColor(group_color)
+                border.setAlpha(58)
+                painter.setPen(QPen(border, 1.0))
+                painter.setBrush(fill)
+                painter.drawRoundedRect(bounds, 22, 22)
+                painter.setPen(group_color)
+                painter.drawText(
+                    bounds.adjusted(10, 4, -10, -4),
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+                    f"GROUP {group_id}",
+                )
         focused_id = self._selected_id or self._hovered_id
         focused_ids: set[str] = set()
         if focused_id:
@@ -604,7 +771,7 @@ class FriendMapWidget(QWidget):
             connected = not focused_ids or node.user_id in focused_ids
             radius = radii[node.user_id] * (1.10 if hovered else 1.0)
             node_rect = self._node_rects[node.user_id]
-            color = activity_rank_color(index + 1)
+            color = self._node_color(index, node)
             if hovered:
                 color = color.lighter(120)
             if not connected:
@@ -744,19 +911,34 @@ class FriendMapWidget(QWidget):
             QToolTip.showText(
                 event.globalPosition().toPoint(),
                 f"<b>{first.display_name} ↔ {second.display_name}</b><br><br>"
-                f"{metric_name}<br><b>{value}</b>",
+                f"{metric_name}<br><b>{value}</b>"
+                + (
+                    f"<br><br>{hovered_link.encounters} measured same-instance "
+                    f"encounter{'s' if hovered_link.encounters != 1 else ''} contribute "
+                    "to group detection"
+                    if self._color_mode == "Friend groups"
+                    else ""
+                ),
                 self,
             )
             return
         node = next(item for item in self._nodes if item.user_id == hovered)
         relationships = self.measured_relationship_count(hovered)
         rank = self.rank_for(hovered)
+        group_id = self.group_for(hovered)
+        group_line = (
+            f"<br>Friend group {group_id} · inferred from repeated same-instance overlap"
+            if self._color_mode == "Friend groups" and group_id > 0
+            else "<br>Unclustered · not enough same-instance evidence"
+            if self._color_mode == "Friend groups"
+            else ""
+        )
         QToolTip.showText(
             event.globalPosition().toPoint(),
             f"<b>{node.display_name}</b><br>"
             f"{format_duration(node.milliseconds)} recorded around you<br>"
             f"Rank #{rank} · {relationships} measured relationship"
-            f"{'s' if relationships != 1 else ''}<br>"
+            f"{'s' if relationships != 1 else ''}{group_line}<br>"
             f"{node.sessions} shared session{'s' if node.sessions != 1 else ''}",
             self,
         )

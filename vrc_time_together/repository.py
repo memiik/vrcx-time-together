@@ -220,9 +220,11 @@ class VrcxRepository:
             self._cache[key] = result
         return result
 
-    def load_friend_map(self, state: AppState, max_nodes: int = 40) -> FriendMapData:
+    def load_friend_map(
+        self, state: AppState, max_nodes: int | None = 40
+    ) -> FriendMapData:
         signature = self._prepare_cache()
-        max_nodes = max(2, min(60, max_nodes))
+        max_nodes = max(2, max_nodes) if max_nodes is not None else None
         key = (
             "friend-map",
             signature,
@@ -568,7 +570,9 @@ class VrcxRepository:
             co_presence=co_presence,
         )
 
-    def _query_friend_map(self, state: AppState, max_nodes: int) -> FriendMapData:
+    def _query_friend_map(
+        self, state: AppState, max_nodes: int | None
+    ) -> FriendMapData:
         if state.end_date < state.start_date:
             raise ValueError("The end date must be on or after the start date.")
         range_start, range_end = local_range_utc(state.start_date, state.end_date)
@@ -577,8 +581,11 @@ class VrcxRepository:
             parameters: dict[str, object] = {
                 "start_at": sqlite_timestamp(range_start),
                 "end_at": sqlite_timestamp(range_end),
-                "max_nodes": max_nodes,
             }
+            limit_clause = ""
+            if max_nodes is not None:
+                parameters["max_nodes"] = max_nodes
+                limit_clause = "LIMIT :max_nodes"
             clipped = """
                 MAX(0.0,
                     (MIN(julianday(j.created_at), julianday(:end_at)) -
@@ -603,18 +610,23 @@ class VrcxRepository:
                     GROUP BY f.user_id, f.display_name
                     HAVING milliseconds > 0
                     ORDER BY milliseconds DESC, f.display_name COLLATE NOCASE
-                    LIMIT :max_nodes
+                    {limit_clause}
                     """,
                     parameters,
                 )
             )
             if not stats:
                 return FriendMapData(tuple(), tuple())
-            placeholders: list[str] = []
-            for index, stat in enumerate(stats):
-                key = f"map_user_{index}"
-                parameters[key] = stat["user_id"]
-                placeholders.append(f":{key}")
+            selected_user_clause = ""
+            if max_nodes is not None:
+                placeholders: list[str] = []
+                for index, stat in enumerate(stats):
+                    key = f"map_user_{index}"
+                    parameters[key] = stat["user_id"]
+                    placeholders.append(f":{key}")
+                selected_user_clause = (
+                    f"AND f.user_id IN ({', '.join(placeholders)})"
+                )
             rows = list(
                 connection.execute(
                     f"""
@@ -631,7 +643,7 @@ class VrcxRepository:
                       AND julianday(j.created_at) > julianday(:start_at)
                       AND julianday(j.created_at) - (j.time / 86400000.0)
                             < julianday(:end_at)
-                      AND f.user_id IN ({', '.join(placeholders)})
+                      {selected_user_clause}
                     ORDER BY j.created_at
                     """,
                     parameters,
