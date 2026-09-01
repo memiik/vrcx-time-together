@@ -112,7 +112,7 @@ No Python installation is required for packaged builds.
 1. In the repository’s **Actions** tab, open a completed **Windows build and release** workflow run.
 2. Download `VRCX-Time-Together-windows-x64` from **Artifacts**.
 3. Extract the ZIP. It contains a standalone `.exe`, a portable application ZIP, and SHA-256 checksums.
-4. Run `VRCX-Time-Together-1.2.0-<commit>-windows-x64.exe`, or extract the portable ZIP and run `VRCX Time Together.exe`. Keep its `_internal` directory beside the executable.
+4. Run `VRCX-Time-Together-1.3.0-<commit>-windows-x64.exe`, or extract the portable ZIP and run `VRCX Time Together.exe`. Keep its `_internal` directory beside the executable.
 
 For tagged releases, the standalone `.exe` and portable ZIP are also available from the repository’s **Releases** page.
 

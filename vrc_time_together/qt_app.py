@@ -27,7 +27,16 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QAction, QCloseEvent, QIcon, QKeySequence, QPixmap
+from PySide6.QtGui import (
+    QAction,
+    QCloseEvent,
+    QColor,
+    QIcon,
+    QKeySequence,
+    QPainter,
+    QPen,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -95,6 +104,7 @@ from .qt_theme import (
     ACCENT,
     SERIES_COLORS,
     SUCCESS,
+    TEXT,
     WARNING,
     apply_theme,
 )
@@ -112,6 +122,28 @@ LOGGER = logging.getLogger(__name__)
 ENGLISH_LOCALE = QLocale(QLocale.Language.English, QLocale.Country.UnitedKingdom)
 SETTINGS_ORGANIZATION = "VRCX Time Together"
 SETTINGS_APPLICATION = "Desktop"
+
+
+def map_zoom_icon(*, plus: bool) -> QIcon:
+    icon = QIcon()
+    for mode, color in (
+        (QIcon.Mode.Normal, QColor(TEXT)),
+        (QIcon.Mode.Active, QColor("white")),
+        (QIcon.Mode.Selected, QColor("white")),
+    ):
+        pixmap = QPixmap(16, 16)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(color, 1.7)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.drawLine(QPoint(3, 8), QPoint(13, 8))
+        if plus:
+            painter.drawLine(QPoint(8, 3), QPoint(8, 13))
+        painter.end()
+        icon.addPixmap(pixmap, mode)
+    return icon
 DATABASE_PATH_KEY = "databasePath"
 PAGE_OVERVIEW = 0
 PAGE_FRIENDS = 1
@@ -1233,27 +1265,28 @@ class MainWindow(QMainWindow):
         self.map_visuals_layout.addWidget(self._build_map_network_panel(), 4)
         self.map_visuals_layout.addWidget(self._build_map_ranking_panel(), 1)
         content_layout.addWidget(self.map_visuals_host, 1)
-        content_layout.addWidget(self._build_map_inspector())
 
         scroll.setWidget(self.map_page_content)
         layout.addWidget(scroll, 1)
+        # Keep selection details visible while the map workspace itself scrolls.
+        layout.addWidget(self._build_map_inspector())
         return page
 
     def _build_map_toolbar(self) -> QFrame:
         controls = QFrame()
         controls.setObjectName("Panel")
         self.map_toolbar_layout = QGridLayout(controls)
-        self.map_toolbar_layout.setContentsMargins(12, 8, 12, 8)
-        self.map_toolbar_layout.setHorizontalSpacing(12)
-        self.map_toolbar_layout.setVerticalSpacing(7)
+        self.map_toolbar_layout.setContentsMargins(16, 11, 16, 12)
+        self.map_toolbar_layout.setHorizontalSpacing(16)
+        self.map_toolbar_layout.setVerticalSpacing(11)
 
         def control_group(label: str, control: QWidget) -> QWidget:
             group = QWidget()
-            group_layout = QHBoxLayout(group)
+            group_layout = QVBoxLayout(group)
             group_layout.setContentsMargins(0, 0, 0, 0)
-            group_layout.setSpacing(7)
-            caption = QLabel(label.upper())
-            caption.setObjectName("MetricLabel")
+            group_layout.setSpacing(5)
+            caption = QLabel(label)
+            caption.setObjectName("MapControlLabel")
             group_layout.addWidget(caption)
             group_layout.addWidget(control)
             return group
@@ -1262,17 +1295,18 @@ class MainWindow(QMainWindow):
             ("12", "20", "30", "40", "All"), "20"
         )
         self.map_friend_count.value_changed.connect(self.render_friend_map)
-        self.map_friends_control = control_group("Friends", self.map_friend_count)
+        self.map_friends_control = control_group("Friends shown", self.map_friend_count)
         self.map_connection_detail = SegmentedControl(
             ("Focused", "Balanced", "All"), "Focused"
         )
         self.map_connection_detail.setToolTip(
             "Focused keeps the strongest useful links. Balanced adds context. "
-            "All shows every measured connection."
+            "All shows every measured connection. In Intro tree these correspond "
+            "to strong evidence, moderate-or-better evidence, and every possible path."
         )
         self.map_connection_detail.value_changed.connect(self.render_friend_map)
         self.map_connections_control = control_group(
-            "Connections", self.map_connection_detail
+            "Connection detail", self.map_connection_detail
         )
         self.map_connection_metric = QComboBox()
         self.map_connection_metric.addItems(
@@ -1285,16 +1319,40 @@ class MainWindow(QMainWindow):
             "describes historical consistency rather than a future prediction."
         )
         self.map_connection_metric.currentTextChanged.connect(self.render_friend_map)
-        self.map_metric_control = control_group("Metric", self.map_connection_metric)
-        self.map_view_mode = SegmentedControl(("Activity", "Groups"), "Activity")
+        self.map_metric_control = control_group("Connection metric", self.map_connection_metric)
+        self.map_view_mode = SegmentedControl(
+            ("Activity", "Groups", "Intro tree"), "Activity"
+        )
         self.map_view_mode.setToolTip(
             "Activity colors nodes by time rank. Groups detects communities from repeated "
-            "same-instance overlap; it does not assume those people are friends."
+            "same-instance overlap. Intro tree builds possible paths from friendship "
+            "timestamps and same-instance evidence; it cannot know who actually introduced whom."
         )
         self.map_view_mode.value_changed.connect(self.render_friend_map)
-        self.map_view_control = control_group("View", self.map_view_mode)
-        self.map_reset_button = QPushButton("Reset view")
+        self.map_view_control = control_group("Map view", self.map_view_mode)
+        self.map_zoom_out_button = QPushButton()
+        self.map_zoom_out_button.setObjectName("MapZoomButton")
+        self.map_zoom_out_button.setIcon(map_zoom_icon(plus=False))
+        self.map_zoom_out_button.setIconSize(QSize(16, 16))
+        self.map_zoom_out_button.setAccessibleName("Zoom out")
+        self.map_zoom_out_button.setToolTip("Zoom out")
+        self.map_zoom_out_button.clicked.connect(lambda: self.friend_map.zoom_out())
+        self.map_zoom_in_button = QPushButton()
+        self.map_zoom_in_button.setObjectName("MapZoomButton")
+        self.map_zoom_in_button.setIcon(map_zoom_icon(plus=True))
+        self.map_zoom_in_button.setIconSize(QSize(16, 16))
+        self.map_zoom_in_button.setAccessibleName("Zoom in")
+        self.map_zoom_in_button.setToolTip("Zoom in")
+        self.map_zoom_in_button.clicked.connect(lambda: self.friend_map.zoom_in())
+        self.map_reset_button = QPushButton("Fit view")
         self.map_reset_button.clicked.connect(lambda: self.friend_map.reset_view())
+        self.map_view_actions = QWidget()
+        view_actions_layout = QHBoxLayout(self.map_view_actions)
+        view_actions_layout.setContentsMargins(0, 0, 0, 0)
+        view_actions_layout.setSpacing(5)
+        view_actions_layout.addWidget(self.map_zoom_out_button)
+        view_actions_layout.addWidget(self.map_zoom_in_button)
+        view_actions_layout.addWidget(self.map_reset_button)
         self._map_toolbar_compact: bool | None = None
         self._layout_map_toolbar(compact=False)
         return controls
@@ -1341,6 +1399,11 @@ class MainWindow(QMainWindow):
             "and green is 21+.\n"
             "• Groups view colors and positions inferred communities using repeated, measured "
             "same-instance overlap. It cannot know whether two people are actually friends.\n"
+            "• Intro tree is a conservative inferred view. A friend can appear below an earlier "
+            "friend only when both were recorded in the same known instance around the friendship "
+            "event. Dashed lines are less certain; YOU means no credible introducer was observed.\n"
+            "• The evidence score is a weighted, explainable ranking—not the probability that an "
+            "introduction really happened.\n"
             "• Merely appearing in the same date range adds no group strength. Actual overlap "
             "in the same known instance is the clustering evidence.\n"
             "• Larger nodes mean more recorded time around you.\n"
@@ -1402,6 +1465,10 @@ class MainWindow(QMainWindow):
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
         )
         ranking_layout.addWidget(self.map_ranking_note)
+        self._map_ranking_fallback = (
+            "Bar = time · Color = activity rank\n"
+            "Click to select · Double-click for insights"
+        )
         self.map_top_friends = TopFriendsBarChart()
         self.map_top_friends.friend_selected.connect(self.select_map_friend)
         self.map_top_friends.friend_activated.connect(self.open_map_friend_insights)
@@ -1412,48 +1479,73 @@ class MainWindow(QMainWindow):
         ranking_scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
+        ranking_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+        )
         ranking_scroll.setWidget(self.map_top_friends)
-        ranking_layout.addWidget(ranking_scroll, 1)
+        ranking_scroll_row = QHBoxLayout()
+        ranking_scroll_row.setContentsMargins(0, 0, 0, 0)
+        ranking_scroll_row.setSpacing(0)
+        # Mirror the scrollbar gutter so the ranked rows remain optically centered.
+        ranking_scroll_row.addSpacing(10)
+        ranking_scroll_row.addWidget(ranking_scroll, 1)
+        ranking_layout.addLayout(ranking_scroll_row, 1)
         return self.map_ranking_panel
 
     def show_map_ranking_hover(self, details: str) -> None:
-        self.map_ranking_note.setText(
-            details or "Click to select · Double-click for insights"
-        )
+        self.map_ranking_note.setText(details or self._map_ranking_fallback)
 
     def _build_map_inspector(self) -> QFrame:
         self.map_detail = QFrame()
-        self.map_detail.setObjectName("DetailStrip")
+        self.map_detail.setObjectName("MapDetailPanel")
         detail_layout = QVBoxLayout(self.map_detail)
-        detail_layout.setContentsMargins(14, 10, 14, 10)
-        detail_layout.setSpacing(8)
+        detail_layout.setContentsMargins(17, 9, 17, 10)
+        detail_layout.setSpacing(4)
         detail_header = QHBoxLayout()
+        detail_header.setSpacing(10)
         self.map_detail_title = QLabel("Select a friend")
-        self.map_detail_title.setObjectName("SectionTitle")
+        self.map_detail_title.setObjectName("MapDetailTitle")
         detail_header.addWidget(self.map_detail_title)
         self.map_detail_rank = QLabel()
-        self.map_detail_rank.setObjectName("Muted")
+        self.map_detail_rank.setObjectName("MapDetailMeta")
         detail_header.addWidget(self.map_detail_rank)
         detail_header.addStretch(1)
+        detail_layout.addLayout(detail_header)
+
         self.map_insights_button = QPushButton("Open friend insights")
         self.map_insights_button.setObjectName("PrimaryButton")
         self.map_insights_button.setEnabled(False)
         self.map_insights_button.clicked.connect(self.open_selected_map_friend_insights)
-        detail_header.addWidget(self.map_insights_button)
-        detail_layout.addLayout(detail_header)
+        self.map_focus_path_button = QPushButton("Focus path")
+        self.map_focus_path_button.setToolTip(
+            "Zoom and center the possible path to this friend."
+        )
+        self.map_focus_path_button.setEnabled(False)
+        self.map_focus_path_button.hide()
+        self.map_focus_path_button.clicked.connect(
+            lambda: self.friend_map.focus_on_friend(
+                self._selected_map_friend_id or ""
+            )
+        )
         self.map_inspector_idle = QLabel(
             "Click a node to explore their relationships. Double-click to open detailed insights."
         )
-        self.map_inspector_idle.setObjectName("Muted")
+        self.map_inspector_idle.setObjectName("MapHelperText")
         detail_layout.addWidget(self.map_inspector_idle)
 
+        detail_body = QWidget()
+        detail_body_layout = QHBoxLayout(detail_body)
+        detail_body_layout.setContentsMargins(0, 0, 0, 0)
+        detail_body_layout.setSpacing(14)
         self.map_inspector_content = QWidget()
-        inspector_layout = QHBoxLayout(self.map_inspector_content)
-        inspector_layout.setContentsMargins(0, 0, 0, 0)
-        inspector_layout.setSpacing(24)
+        self.map_inspector_layout = QGridLayout(self.map_inspector_content)
+        self.map_inspector_layout.setContentsMargins(0, 0, 0, 0)
+        self.map_inspector_layout.setHorizontalSpacing(24)
+        self.map_inspector_layout.setVerticalSpacing(12)
 
         def inspector_metric() -> tuple[QWidget, QLabel, QLabel]:
             host = QWidget()
+            host.setObjectName("MapInspectorMetric")
             host_layout = QVBoxLayout(host)
             host_layout.setContentsMargins(0, 0, 0, 0)
             host_layout.setSpacing(1)
@@ -1469,13 +1561,50 @@ class MainWindow(QMainWindow):
         sessions_host, self.map_sessions_value, self.map_sessions_caption = inspector_metric()
         relationships_host, self.map_relationships_value, self.map_relationships_caption = inspector_metric()
         strongest_host, self.map_strongest_value, self.map_strongest_caption = inspector_metric()
-        inspector_layout.addWidget(time_host)
-        inspector_layout.addWidget(sessions_host)
-        inspector_layout.addWidget(relationships_host)
-        inspector_layout.addWidget(strongest_host, 1)
+        self.map_metric_hosts = (
+            time_host,
+            sessions_host,
+            relationships_host,
+            strongest_host,
+        )
+        self._map_inspector_compact: bool | None = None
+        self._layout_map_inspector(compact=False)
         self.map_inspector_content.hide()
-        detail_layout.addWidget(self.map_inspector_content)
+        detail_body_layout.addWidget(self.map_inspector_content, 1)
+
+        self.map_detail_actions = QWidget()
+        action_layout = QHBoxLayout(self.map_detail_actions)
+        action_layout.setContentsMargins(0, 0, 0, 0)
+        action_layout.setSpacing(7)
+        action_layout.addWidget(self.map_focus_path_button)
+        action_layout.addWidget(self.map_insights_button)
+        self.map_detail_actions.hide()
+        detail_body_layout.addWidget(
+            self.map_detail_actions,
+            0,
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom,
+        )
+        detail_layout.addWidget(detail_body)
         return self.map_detail
+
+    def _layout_map_inspector(self, *, compact: bool) -> None:
+        if self._map_inspector_compact == compact:
+            return
+        self._map_inspector_compact = compact
+        for host in self.map_metric_hosts:
+            self.map_inspector_layout.removeWidget(host)
+        columns = 2 if compact else 4
+        for index, host in enumerate(self.map_metric_hosts):
+            self.map_inspector_layout.addWidget(
+                host,
+                index // columns,
+                index % columns,
+            )
+        for column in range(4):
+            self.map_inspector_layout.setColumnStretch(
+                column,
+                1 if column < columns else 0,
+            )
 
     def _layout_map_toolbar(self, *, compact: bool) -> None:
         if self._map_toolbar_compact == compact:
@@ -1486,28 +1615,36 @@ class MainWindow(QMainWindow):
             self.map_connections_control,
             self.map_metric_control,
             self.map_view_control,
-            self.map_reset_button,
+            self.map_view_actions,
         )
         for widget in widgets:
             self.map_toolbar_layout.removeWidget(widget)
+        for column in range(5):
+            self.map_toolbar_layout.setColumnStretch(column, 0)
         if compact:
-            self.map_toolbar_layout.addWidget(self.map_friends_control, 0, 0)
-            self.map_toolbar_layout.addWidget(self.map_connections_control, 0, 1)
-            self.map_toolbar_layout.addWidget(self.map_metric_control, 1, 0)
-            self.map_toolbar_layout.addWidget(self.map_view_control, 1, 1)
+            self.map_toolbar_layout.addWidget(self.map_view_control, 0, 0, 1, 2)
             self.map_toolbar_layout.addWidget(
-                self.map_reset_button,
-                1,
+                self.map_view_actions,
+                0,
                 2,
-                Qt.AlignmentFlag.AlignRight,
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom,
             )
-        else:
-            self.map_toolbar_layout.addWidget(self.map_friends_control, 0, 0)
-            self.map_toolbar_layout.addWidget(self.map_connections_control, 0, 1)
-            self.map_toolbar_layout.addWidget(self.map_metric_control, 0, 2)
-            self.map_toolbar_layout.addWidget(self.map_view_control, 0, 3)
-            self.map_toolbar_layout.addWidget(self.map_reset_button, 0, 4)
+            self.map_toolbar_layout.addWidget(self.map_friends_control, 1, 0)
+            self.map_toolbar_layout.addWidget(self.map_connections_control, 1, 1)
+            self.map_toolbar_layout.addWidget(self.map_metric_control, 1, 2)
             self.map_toolbar_layout.setColumnStretch(2, 1)
+        else:
+            self.map_toolbar_layout.addWidget(self.map_view_control, 0, 0)
+            self.map_toolbar_layout.addWidget(self.map_friends_control, 0, 1)
+            self.map_toolbar_layout.addWidget(self.map_connections_control, 0, 2)
+            self.map_toolbar_layout.addWidget(self.map_metric_control, 0, 3)
+            self.map_toolbar_layout.addWidget(
+                self.map_view_actions,
+                0,
+                4,
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom,
+            )
+            self.map_toolbar_layout.setColumnStretch(3, 1)
 
     def _connect_shortcuts(self) -> None:
         refresh = QAction(self)
@@ -1993,9 +2130,18 @@ class MainWindow(QMainWindow):
         node_limit = None if count_value == "All" else int(count_value)
         detail = self.map_connection_detail.value()
         metric = self.map_connection_metric.currentText()
+        view_mode = self.map_view_mode.value()
         color_mode = (
-            "Friend groups" if self.map_view_mode.value() == "Groups" else "Activity"
+            "Friend groups"
+            if view_mode == "Groups"
+            else "Origins"
+            if view_mode == "Intro tree"
+            else "Activity"
         )
+        origins_visible = color_mode == "Origins"
+        self.map_connection_detail.setEnabled(True)
+        self.map_metric_control.setVisible(not origins_visible)
+        self.map_focus_path_button.setVisible(origins_visible)
         self.friend_map.set_data(
             data,
             node_limit=node_limit,
@@ -2018,6 +2164,7 @@ class MainWindow(QMainWindow):
             if color_mode == "Friend groups"
             else ""
         )
+        inferred_count = link_count if origins_visible else 0
         focus_context = (
             f" · Group {self._selected_map_group_id} focused"
             if self._selected_map_group_id
@@ -2025,29 +2172,49 @@ class MainWindow(QMainWindow):
         )
         self._map_context_base = (
             f"{node_count} friend{'s' if node_count != 1 else ''} · "
+            f"{inferred_count} possible introduction path"
+            f"{'s' if inferred_count != 1 else ''} · Uses recorded friendship history"
+            if origins_visible
+            else f"{node_count} friend{'s' if node_count != 1 else ''} · "
             f"{link_count} of {measured_count} measured connections shown · {metric}"
             f"{group_context}"
         )
         self.map_context.setText(f"{self._map_context_base}{focus_context}")
         link_legend = (
-            "Stronger links = more consistent co-appearance"
+            "Lines = possible introduction paths, not confirmed introductions"
+            if origins_visible
+            else "Stronger links = more consistent co-appearance"
             if metric == "Co-appearance likelihood"
             else "Stronger links = more shared-instance time"
         )
         color_legend = (
-            self.friend_map.group_legend_html()
+            '<span style="color:#65b98a">●</span> Strong evidence &nbsp; '
+            '<span style="color:#55c7d8">●</span> Moderate evidence &nbsp; '
+            '<span style="color:#f0b35a">●</span> Weak evidence &nbsp; '
+            '<span style="color:#778394">●</span> Unresolved'
+            if origins_visible
+            else self.friend_map.group_legend_html()
             if color_mode == "Friend groups"
             else activity_rank_legend_html()
         )
         color_meaning = (
-            "Color + position = inferred groups · Click a cluster to explore"
+            "Left-to-right = possible introduction generations · Dashed = uncertain"
+            if origins_visible
+            else "Color + position = inferred groups · Click a cluster to explore"
             if color_mode == "Friend groups"
             else "Color = activity rank"
         )
         self.map_legend.setText(
             f"{color_legend} &nbsp; · &nbsp; {color_meaning} &nbsp; · &nbsp; "
-            f"Larger node = more time &nbsp; · &nbsp; {link_legend} &nbsp; · &nbsp; "
-            '<span style="color:#e6b85c">━</span> Gold = strongest overlap or hovered link'
+            f"Larger node = more time &nbsp; · &nbsp; {link_legend}"
+            + (
+                ""
+                if origins_visible
+                else (
+                    ' &nbsp; · &nbsp; <span style="color:#e6b85c">━</span> '
+                    "Gold = strongest overlap or hovered link"
+                )
+            )
         )
         visible_nodes = self.friend_map.visible_nodes()
         self._update_map_group_panel()
@@ -2107,12 +2274,33 @@ class MainWindow(QMainWindow):
 
     def _update_map_group_panel(self) -> None:
         visible_nodes = self.friend_map.visible_nodes()
+        if self.map_view_mode.value() == "Intro tree":
+            self.map_ranking_title.setText(
+                f"Friends in tree · {len(visible_nodes)}"
+            )
+            self._map_ranking_fallback = (
+                "Bar = time · Color = path evidence\n"
+                "Click to inspect · Double-click for insights"
+            )
+            self.map_ranking_note.setText(self._map_ranking_fallback)
+            self.map_top_friends.set_nodes(
+                visible_nodes, colors=self.friend_map.node_colors()
+            )
+            return
+        self._map_ranking_fallback = (
+            "Bar = time · Color = inferred group\n"
+            "Click to select · Double-click for insights"
+            if self.map_view_mode.value() == "Groups"
+            else "Bar = time · Color = activity rank\n"
+            "Click to select · Double-click for insights"
+        )
+        self.map_ranking_note.setText(self._map_ranking_fallback)
         group_id = self._selected_map_group_id
         members = self.friend_map.group_members(group_id)
         colors = self.friend_map.node_colors()
         if group_id <= 0:
             self.map_ranking_title.setText(
-                f"Top {len(visible_nodes)} friend"
+                f"Time ranking · {len(visible_nodes)} friend"
                 f"{'s' if len(visible_nodes) != 1 else ''}"
             )
             self.map_group_summary.setText(
@@ -2234,9 +2422,59 @@ class MainWindow(QMainWindow):
         self.map_strongest_value.setText(strongest_value)
         self.map_strongest_value.setToolTip(strongest_value)
         self.map_strongest_caption.setText(strongest_caption)
+        if self.map_view_mode.value() == "Intro tree":
+            introduction = self.friend_map.introduction_for(user_id)
+            names = {item.user_id: item.display_name for item in data.nodes}
+            parent_name = "YOU / unresolved"
+            evidence_score_text = "No inference"
+            date_text = "Friendship date unavailable"
+            evidence = "No recorded friendship timestamp is available."
+            if introduction is not None:
+                if introduction.parent_user_id:
+                    parent_name = names.get(
+                        introduction.parent_user_id, "Earlier friend"
+                    )
+                    evidence_score_text = (
+                        f"{introduction.evidence_score * 100:.0f} / 100"
+                    )
+                if introduction.befriended_at is not None:
+                    date_text = format_local_datetime(introduction.befriended_at)
+                evidence = introduction.evidence
+                if (
+                    introduction.parent_user_id
+                    and not self.friend_map.introduction_path_visible(user_id)
+                ):
+                    evidence += (
+                        " This path is below the current evidence filter; choose "
+                        "Balanced or All connections to display it."
+                    )
+                if introduction.alternative_parent_ids:
+                    alternatives = ", ".join(
+                        names.get(item, "Earlier friend")
+                        for item in introduction.alternative_parent_ids
+                    )
+                    evidence += f" Alternatives: {alternatives}."
+            intro_context = (
+                f"Friends since {date_text}"
+                if introduction is not None
+                and introduction.befriended_at is not None
+                else date_text
+            )
+            self.map_detail_rank.setText(
+                f"Rank #{rank} · {intro_context}" if rank else intro_context
+            )
+            self.map_relationships_value.setText(evidence_score_text)
+            self.map_relationships_caption.setText("Evidence score")
+            self.map_strongest_value.setText(parent_name)
+            self.map_strongest_value.setToolTip(evidence)
+            self.map_strongest_caption.setText("Possible path via")
         self.map_inspector_idle.hide()
         self.map_inspector_content.show()
+        self.map_detail_actions.show()
         self.map_insights_button.setEnabled(True)
+        self.map_focus_path_button.setEnabled(
+            self.map_view_mode.value() == "Intro tree"
+        )
 
     def select_map_friend(self, user_id: str) -> None:
         self.show_map_friend(user_id)
@@ -2250,8 +2488,10 @@ class MainWindow(QMainWindow):
         self.map_detail_title.setText("Select a friend")
         self.map_detail_rank.clear()
         self.map_inspector_content.hide()
+        self.map_detail_actions.hide()
         self.map_inspector_idle.show()
         self.map_insights_button.setEnabled(False)
+        self.map_focus_path_button.setEnabled(False)
 
     def open_map_friend_insights(self, user_id: str) -> None:
         self._selected_map_friend_id = user_id
@@ -2518,10 +2758,11 @@ class MainWindow(QMainWindow):
         self.map_ranking_panel.setMinimumWidth(230 if map_side_by_side else 0)
         self.map_ranking_panel.setMaximumWidth(285 if map_side_by_side else 16_777_215)
         self.map_ranking_panel.setMinimumHeight(180)
-        toolbar_stacked = self.width() < 1040
+        toolbar_stacked = self.width() < 1360
         self._layout_map_toolbar(compact=toolbar_stacked)
+        self._layout_map_inspector(compact=self.width() < 980)
         self.map_page_content.setMinimumHeight(
-            900 if toolbar_stacked else 760 if not map_side_by_side else 0
+            1160 if not map_side_by_side else 0
         )
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt API

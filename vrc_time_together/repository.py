@@ -11,6 +11,7 @@ from itertools import combinations
 from pathlib import Path
 from typing import Any
 
+from .friend_introductions import IntroductionSession, infer_introductions
 from .models import (
     AppState,
     CoPresenceStat,
@@ -96,6 +97,17 @@ def find_friend_table(connection: sqlite3.Connection) -> str:
             f"SELECT COUNT(*) FROM {quote_identifier(table)}"
         ).fetchone()[0],
     )
+
+
+def find_friend_history_table(
+    connection: sqlite3.Connection, current_table: str
+) -> str | None:
+    expected = current_table.removesuffix("_current") + "_history"
+    row = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (expected,),
+    ).fetchone()
+    return row[0] if row is not None else None
 
 
 def aggregate_time_series(
@@ -323,6 +335,7 @@ class VrcxRepository:
                     },
                 )
             )
+
             matching_count = len(rows)
             if state.result_limit is not None:
                 rows = rows[: state.result_limit]
@@ -650,6 +663,56 @@ class VrcxRepository:
                 )
             )
 
+            friendship_dates: dict[str, datetime] = {}
+            introduction_rows: list[sqlite3.Row] = []
+            history_table = find_friend_history_table(connection, friend_table)
+            introduction_parameters: dict[str, object] = {}
+            introduction_placeholders: list[str] = []
+            for index, stat in enumerate(stats):
+                key = f"intro_user_{index}"
+                introduction_parameters[key] = stat["user_id"]
+                introduction_placeholders.append(f":{key}")
+            if history_table is not None:
+                history_rows = connection.execute(
+                    f"""
+                    SELECT user_id, MAX(created_at) AS befriended_at
+                    FROM {quote_identifier(history_table)}
+                    WHERE type = 'Friend'
+                      AND user_id IN ({', '.join(introduction_placeholders)})
+                    GROUP BY user_id
+                    """,
+                    introduction_parameters,
+                )
+                friendship_dates = {
+                    row["user_id"]: parsed
+                    for row in history_rows
+                    if (parsed := parse_utc(row["befriended_at"])) is not None
+                }
+            if friendship_dates:
+                introduction_parameters["intro_start"] = sqlite_timestamp(
+                    min(friendship_dates.values()) - timedelta(days=90)
+                )
+                introduction_parameters["intro_end"] = sqlite_timestamp(
+                    max(friendship_dates.values()) + timedelta(days=1)
+                )
+                introduction_rows = list(
+                    connection.execute(
+                        f"""
+                        SELECT j.user_id, j.created_at, j.time,
+                               COALESCE(j.location, '') AS location
+                        FROM gamelog_join_leave AS j
+                        WHERE j.type = 'OnPlayerLeft'
+                          AND j.time > 0
+                          AND j.user_id IN ({', '.join(introduction_placeholders)})
+                          AND julianday(j.created_at) > julianday(:intro_start)
+                          AND julianday(j.created_at) - (j.time / 86400000.0)
+                                < julianday(:intro_end)
+                        ORDER BY j.created_at
+                        """,
+                        introduction_parameters,
+                    )
+                )
+
         intervals: list[_FriendInterval] = []
         names = {row["user_id"]: row["display_name"] for row in stats}
         for row in rows:
@@ -733,7 +796,29 @@ class VrcxRepository:
                 ),
             )
         )
-        return FriendMapData(nodes=nodes, links=links)
+        introduction_sessions: list[IntroductionSession] = []
+        for row in introduction_rows:
+            session_end = parse_utc(row["created_at"])
+            if session_end is None:
+                continue
+            introduction_sessions.append(
+                IntroductionSession(
+                    user_id=row["user_id"],
+                    start=session_end - timedelta(milliseconds=row["time"]),
+                    end=session_end,
+                    location=row["location"],
+                )
+            )
+        introductions = infer_introductions(
+            tuple(node.user_id for node in nodes),
+            friendship_dates,
+            tuple(introduction_sessions),
+        )
+        return FriendMapData(
+            nodes=nodes,
+            links=links,
+            introductions=introductions,
+        )
 
     @staticmethod
     def _merge_intervals(
