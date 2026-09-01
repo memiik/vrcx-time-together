@@ -1286,10 +1286,13 @@ class MainWindow(QMainWindow):
         )
         self.map_connection_metric.currentTextChanged.connect(self.render_friend_map)
         self.map_metric_control = control_group("Metric", self.map_connection_metric)
-        self.map_view_mode = SegmentedControl(("Activity", "Groups"), "Activity")
+        self.map_view_mode = SegmentedControl(
+            ("Activity", "Groups", "Intro tree"), "Activity"
+        )
         self.map_view_mode.setToolTip(
             "Activity colors nodes by time rank. Groups detects communities from repeated "
-            "same-instance overlap; it does not assume those people are friends."
+            "same-instance overlap. Origins builds possible introduction paths from friendship "
+            "timestamps and same-instance evidence; it cannot know who actually introduced whom."
         )
         self.map_view_mode.value_changed.connect(self.render_friend_map)
         self.map_view_control = control_group("View", self.map_view_mode)
@@ -1341,6 +1344,9 @@ class MainWindow(QMainWindow):
             "and green is 21+.\n"
             "• Groups view colors and positions inferred communities using repeated, measured "
             "same-instance overlap. It cannot know whether two people are actually friends.\n"
+            "• Origins view is a conservative inferred tree. A friend can appear below an earlier "
+            "friend only when both were recorded in the same known instance around the friendship "
+            "event. Dashed lines are less certain; YOU means no credible introducer was observed.\n"
             "• Merely appearing in the same date range adds no group strength. Actual overlap "
             "in the same known instance is the clustering evidence.\n"
             "• Larger nodes mean more recorded time around you.\n"
@@ -1417,9 +1423,12 @@ class MainWindow(QMainWindow):
         return self.map_ranking_panel
 
     def show_map_ranking_hover(self, details: str) -> None:
-        self.map_ranking_note.setText(
-            details or "Click to select · Double-click for insights"
+        fallback = (
+            "Ordered by time around you · Select a node for path evidence"
+            if self.map_view_mode.value() == "Intro tree"
+            else "Click to select · Double-click for insights"
         )
+        self.map_ranking_note.setText(details or fallback)
 
     def _build_map_inspector(self) -> QFrame:
         self.map_detail = QFrame()
@@ -1993,9 +2002,17 @@ class MainWindow(QMainWindow):
         node_limit = None if count_value == "All" else int(count_value)
         detail = self.map_connection_detail.value()
         metric = self.map_connection_metric.currentText()
+        view_mode = self.map_view_mode.value()
         color_mode = (
-            "Friend groups" if self.map_view_mode.value() == "Groups" else "Activity"
+            "Friend groups"
+            if view_mode == "Groups"
+            else "Origins"
+            if view_mode == "Intro tree"
+            else "Activity"
         )
+        origins_visible = color_mode == "Origins"
+        self.map_connection_detail.setEnabled(not origins_visible)
+        self.map_connection_metric.setEnabled(not origins_visible)
         self.friend_map.set_data(
             data,
             node_limit=node_limit,
@@ -2018,6 +2035,12 @@ class MainWindow(QMainWindow):
             if color_mode == "Friend groups"
             else ""
         )
+        inferred_count = sum(
+            1
+            for item in self.friend_map.visible_nodes()
+            if (introduction := self.friend_map.introduction_for(item.user_id))
+            and introduction.parent_user_id
+        )
         focus_context = (
             f" · Group {self._selected_map_group_id} focused"
             if self._selected_map_group_id
@@ -2025,29 +2048,46 @@ class MainWindow(QMainWindow):
         )
         self._map_context_base = (
             f"{node_count} friend{'s' if node_count != 1 else ''} · "
+            f"{inferred_count} possible introduction path"
+            f"{'s' if inferred_count != 1 else ''} · Uses recorded friendship history"
+            if origins_visible
+            else f"{node_count} friend{'s' if node_count != 1 else ''} · "
             f"{link_count} of {measured_count} measured connections shown · {metric}"
             f"{group_context}"
         )
         self.map_context.setText(f"{self._map_context_base}{focus_context}")
         link_legend = (
-            "Stronger links = more consistent co-appearance"
+            "Lines = possible introduction paths, not confirmed introductions"
+            if origins_visible
+            else "Stronger links = more consistent co-appearance"
             if metric == "Co-appearance likelihood"
             else "Stronger links = more shared-instance time"
         )
         color_legend = (
-            self.friend_map.group_legend_html()
+            '<span style="color:#65b98a">●</span> Stronger evidence &nbsp; '
+            '<span style="color:#55c7d8">●</span> Possible &nbsp; '
+            '<span style="color:#f0b35a">●</span> Weak &nbsp; '
+            '<span style="color:#778394">●</span> Unresolved'
+            if origins_visible
+            else self.friend_map.group_legend_html()
             if color_mode == "Friend groups"
             else activity_rank_legend_html()
         )
         color_meaning = (
-            "Color + position = inferred groups · Click a cluster to explore"
+            "Left-to-right = possible introduction generations · Dashed = uncertain"
+            if origins_visible
+            else "Color + position = inferred groups · Click a cluster to explore"
             if color_mode == "Friend groups"
             else "Color = activity rank"
         )
         self.map_legend.setText(
             f"{color_legend} &nbsp; · &nbsp; {color_meaning} &nbsp; · &nbsp; "
-            f"Larger node = more time &nbsp; · &nbsp; {link_legend} &nbsp; · &nbsp; "
-            '<span style="color:#e6b85c">━</span> Gold = strongest overlap or hovered link'
+            f"Larger node = more time &nbsp; · &nbsp; {link_legend}"
+            + (
+                ""
+                if origins_visible
+                else ' &nbsp; · &nbsp; <span style="color:#e6b85c">━</span> Gold = strongest overlap or hovered link'
+            )
         )
         visible_nodes = self.friend_map.visible_nodes()
         self._update_map_group_panel()
@@ -2107,6 +2147,18 @@ class MainWindow(QMainWindow):
 
     def _update_map_group_panel(self) -> None:
         visible_nodes = self.friend_map.visible_nodes()
+        if self.map_view_mode.value() == "Intro tree":
+            self.map_ranking_title.setText(
+                f"Friends in tree · {len(visible_nodes)}"
+            )
+            self.map_ranking_note.setText(
+                "Ordered by time around you · Select a node for path evidence"
+            )
+            self.map_top_friends.set_nodes(
+                visible_nodes, colors=self.friend_map.node_colors()
+            )
+            return
+        self.map_ranking_note.setText("Click to select · Double-click for insights")
         group_id = self._selected_map_group_id
         members = self.friend_map.group_members(group_id)
         colors = self.friend_map.node_colors()
@@ -2234,6 +2286,34 @@ class MainWindow(QMainWindow):
         self.map_strongest_value.setText(strongest_value)
         self.map_strongest_value.setToolTip(strongest_value)
         self.map_strongest_caption.setText(strongest_caption)
+        if self.map_view_mode.value() == "Intro tree":
+            introduction = self.friend_map.introduction_for(user_id)
+            names = {item.user_id: item.display_name for item in data.nodes}
+            parent_name = "YOU / unresolved"
+            confidence_text = "No inference"
+            date_text = "Friendship date unavailable"
+            evidence = "No recorded friendship timestamp is available."
+            if introduction is not None:
+                if introduction.parent_user_id:
+                    parent_name = names.get(
+                        introduction.parent_user_id, "Earlier friend"
+                    )
+                    confidence_text = f"{introduction.confidence:.0%}"
+                if introduction.befriended_at is not None:
+                    date_text = format_local_datetime(introduction.befriended_at)
+                evidence = introduction.evidence
+                if introduction.alternative_parent_ids:
+                    alternatives = ", ".join(
+                        names.get(item, "Earlier friend")
+                        for item in introduction.alternative_parent_ids
+                    )
+                    evidence += f" Alternatives: {alternatives}."
+            self.map_detail_rank.setText(f"Possible introduction tree · {date_text}")
+            self.map_relationships_value.setText(confidence_text)
+            self.map_relationships_caption.setText("Inference confidence")
+            self.map_strongest_value.setText(parent_name)
+            self.map_strongest_value.setToolTip(evidence)
+            self.map_strongest_caption.setText("Possible path via")
         self.map_inspector_idle.hide()
         self.map_inspector_content.show()
         self.map_insights_button.setEnabled(True)

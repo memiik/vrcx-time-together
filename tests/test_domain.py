@@ -13,6 +13,10 @@ from vrc_time_together.formatting import (
     format_english_day,
 )
 from vrc_time_together.friend_groups import detect_friend_groups
+from vrc_time_together.friend_introductions import (
+    IntroductionSession,
+    infer_introductions,
+)
 from vrc_time_together.models import AppState, FriendMapLink, FriendMapNode
 from vrc_time_together.repository import (
     VrcxRepository,
@@ -72,6 +76,50 @@ class FriendGroupTests(unittest.TestCase):
         )
 
         self.assertEqual(detect_friend_groups(nodes, tuple()), {"a": 0, "b": 0})
+
+
+class FriendIntroductionTests(unittest.TestCase):
+    def test_uses_only_an_earlier_friend_with_same_instance_evidence(self) -> None:
+        base = datetime(2026, 1, 1, 18, 0, tzinfo=LOCAL_TIMEZONE)
+        introductions = infer_introductions(
+            ("earlier", "child", "later"),
+            {
+                "earlier": base - timedelta(days=30),
+                "child": base,
+                "later": base + timedelta(days=1),
+            },
+            (
+                IntroductionSession(
+                    "earlier", base - timedelta(hours=1), base + timedelta(hours=1), "world:1"
+                ),
+                IntroductionSession(
+                    "child", base - timedelta(minutes=30), base + timedelta(hours=1), "world:1"
+                ),
+                IntroductionSession(
+                    "later", base - timedelta(hours=1), base + timedelta(hours=1), "world:1"
+                ),
+            ),
+        )
+
+        child = next(item for item in introductions if item.child_user_id == "child")
+        self.assertEqual(child.parent_user_id, "earlier")
+        self.assertGreaterEqual(child.confidence, 0.7)
+        self.assertNotEqual(child.parent_user_id, "later")
+
+    def test_falls_back_to_you_without_same_instance_evidence(self) -> None:
+        base = datetime(2026, 1, 1, 18, 0, tzinfo=LOCAL_TIMEZONE)
+        introductions = infer_introductions(
+            ("earlier", "child"),
+            {"earlier": base - timedelta(days=1), "child": base},
+            (
+                IntroductionSession("earlier", base, base + timedelta(hours=1), "world:a"),
+                IntroductionSession("child", base, base + timedelta(hours=1), "world:b"),
+            ),
+        )
+
+        child = next(item for item in introductions if item.child_user_id == "child")
+        self.assertIsNone(child.parent_user_id)
+        self.assertEqual(child.confidence, 0.0)
 
 
 class RepositoryTests(unittest.TestCase):
@@ -225,6 +273,45 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(len(data.links), 1)
         self.assertEqual(data.links[0].milliseconds, 3_600_000)
         self.assertEqual(data.links[0].encounters, 1)
+
+    def test_friend_map_infers_a_possible_introduction_from_history(self) -> None:
+        local_start = datetime.combine(
+            self.local_day,
+            datetime.min.time(),
+            tzinfo=LOCAL_TIMEZONE,
+        )
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE usr_test_friend_log_history (
+                    id INTEGER PRIMARY KEY,
+                    created_at TEXT,
+                    type TEXT,
+                    user_id TEXT,
+                    display_name TEXT
+                );
+                UPDATE gamelog_join_leave SET location = 'wrld_shared:1';
+                """
+            )
+            connection.execute(
+                "INSERT INTO usr_test_friend_log_history VALUES (1, ?, 'Friend', 'usr_a', 'Alpha')",
+                (sqlite_timestamp(local_start - timedelta(days=30)),),
+            )
+            connection.execute(
+                "INSERT INTO usr_test_friend_log_history VALUES (2, ?, 'Friend', 'usr_b', 'Beta')",
+                (sqlite_timestamp(local_start.replace(hour=11, minute=30)),),
+            )
+            connection.commit()
+
+        data = VrcxRepository(self.database_path).load_friend_map(
+            AppState(self.local_day, self.local_day)
+        )
+        beta = next(
+            item for item in data.introductions if item.child_user_id == "usr_b"
+        )
+
+        self.assertEqual(beta.parent_user_id, "usr_a")
+        self.assertGreaterEqual(beta.confidence, 0.7)
         self.assertEqual(data.links[0].likelihood, 0.5)
 
     def test_friend_map_does_not_infer_connections_without_location(self) -> None:

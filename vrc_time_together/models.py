@@ -42,9 +42,23 @@ class FriendMapLink:
 
 
 @dataclass(frozen=True, slots=True)
+class FriendIntroduction:
+    """An explicitly inferred path by which a friendship may have started."""
+
+    child_user_id: str
+    parent_user_id: str | None
+    befriended_at: datetime | None
+    confidence: float
+    evidence: str
+    alternative_parent_ids: tuple[str, ...] = tuple()
+    timestamp_source: str = "friend_event"
+
+
+@dataclass(frozen=True, slots=True)
 class FriendMapData:
     nodes: tuple[FriendMapNode, ...]
     links: tuple[FriendMapLink, ...]
+    introductions: tuple[FriendIntroduction, ...] = tuple()
 
 
 @dataclass(frozen=True, slots=True)
