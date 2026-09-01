@@ -112,7 +112,7 @@ No Python installation is required for packaged builds.
 1. In the repository’s **Actions** tab, open a completed **Windows build and release** workflow run.
 2. Download `VRCX-Time-Together-windows-x64` from **Artifacts**.
 3. Extract the ZIP. It contains a standalone `.exe`, a portable application ZIP, and SHA-256 checksums.
-4. Run `VRCX-Time-Together-1.1.0-<commit>-windows-x64.exe`, or extract the portable ZIP and run `VRCX Time Together.exe`. Keep its `_internal` directory beside the executable.
+4. Run `VRCX-Time-Together-1.2.0-<commit>-windows-x64.exe`, or extract the portable ZIP and run `VRCX Time Together.exe`. Keep its `_internal` directory beside the executable.
 
 For tagged releases, the standalone `.exe` and portable ZIP are also available from the repository’s **Releases** page.
 
@@ -177,8 +177,8 @@ The portable build is created at `dist\VRCX Time Together\VRCX Time Together.exe
 The **Windows build and release** GitHub Actions workflow can also be run manually. A tag matching the application version builds and tests both packages, creates SHA-256 checksums, and publishes a GitHub Release:
 
 ```powershell
-git tag v1.1.0
-git push origin v1.1.0
+git tag v1.2.0
+git push origin v1.2.0
 ```
 
 Before a later release, update both `vrc_time_together.__version__` and `packaging/windows/version_info.txt` to the same version. The workflow rejects mismatched release tags.
