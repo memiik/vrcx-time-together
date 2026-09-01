@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QButtonGroup,
     QHBoxLayout,
@@ -136,6 +136,7 @@ class TopFriendsBarChart(QWidget):
         self._hovered_id: str | None = None
         self._selected_id: str | None = None
         self.setMouseTracking(True)
+        self.setAccessibleName("Friend activity ranking")
         self.setMinimumSize(0, 180)
 
     def set_nodes(
@@ -148,7 +149,7 @@ class TopFriendsBarChart(QWidget):
         self._node_colors = {
             user_id: QColor(color) for user_id, color in (colors or {}).items()
         }
-        self.setMinimumHeight(max(180, 8 + len(self._nodes) * 36))
+        self.setMinimumHeight(max(180, 8 + len(self._nodes) * 52))
         if self._selected_id not in {node.user_id for node in self._nodes}:
             self._selected_id = None
         self.update()
@@ -168,60 +169,88 @@ class TopFriendsBarChart(QWidget):
             )
             return
         maximum = max(node.milliseconds for node in self._nodes) or 1
-        row_height = min(46.0, max(31.0, (self.height() - 8) / len(self._nodes)))
-        name_width = min(126.0, max(82.0, self.width() * 0.38))
-        value_width = 62.0
-        bar_left = name_width + 7
-        bar_width = max(42.0, self.width() - bar_left - value_width - 10)
-        metrics = QFontMetrics(painter.font())
-
+        row_height = min(58.0, max(50.0, (self.height() - 8) / len(self._nodes)))
+        rank_width = 28.0
+        content_left = rank_width + 7.0
+        content_right = max(content_left + 42.0, self.width() - 7.0)
+        value_width = 68.0
+        name_right = max(content_left + 30.0, content_right - value_width - 8.0)
         for index, node in enumerate(self._nodes):
             y = 4.0 + index * row_height
-            row = QRectF(0, y, self.width(), row_height - 2)
+            row = QRectF(0, y, self.width(), row_height - 3)
             self._rows.append((row, node))
             hovered = node.user_id == self._hovered_id
             selected = node.user_id == self._selected_id
             if hovered or selected:
                 background = QColor("#29264d" if selected else SURFACE_RAISED)
-                background.setAlpha(190)
+                background.setAlpha(210 if selected else 175)
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(background)
                 painter.drawRoundedRect(row, 6, 6)
-            painter.setPen(QColor(TEXT_MUTED))
-            name = metrics.elidedText(
-                node.display_name,
-                Qt.TextElideMode.ElideRight,
-                round(name_width - 6),
-            )
-            painter.setPen(QColor(TEXT))
-            painter.drawText(
-                QRectF(3, y, name_width - 6, row_height - 2),
-                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                name,
-            )
-            track = QRectF(bar_left, y + row_height / 2 - 5, bar_width, 10)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor("#202b39"))
-            painter.drawRoundedRect(track, 4, 4)
-            fill = QRectF(
-                track.x(),
-                track.y(),
-                track.width() * math.sqrt(node.milliseconds / maximum),
-                track.height(),
-            )
             fill_color = QColor(
                 self._node_colors.get(node.user_id, activity_rank_color(index + 1))
             )
             if hovered:
-                fill_color = fill_color.lighter(120)
-            painter.setBrush(fill_color)
-            painter.drawRoundedRect(fill, 4, 4)
-            painter.setPen(QColor(TEXT_MUTED))
+                fill_color = fill_color.lighter(118)
+            if selected:
+                painter.setBrush(fill_color)
+                painter.drawRoundedRect(QRectF(0, y + 7, 3, row_height - 17), 1.5, 1.5)
+
+            rank_color = QColor(fill_color)
+            rank_color.setAlpha(215 if hovered or selected else 150)
+            painter.setPen(rank_color)
+            rank_font = QFont(painter.font())
+            rank_font.setPointSizeF(max(7.5, rank_font.pointSizeF() - 1.0))
+            painter.setFont(rank_font)
             painter.drawText(
-                QRectF(bar_left + bar_width + 8, y, value_width, row_height - 2),
+                QRectF(5, y + 4, rank_width - 6, 20),
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                f"{index + 1:02d}",
+            )
+
+            name_font = QFont(painter.font())
+            name_font.setPointSizeF(rank_font.pointSizeF() + 1.0)
+            name_font.setBold(selected)
+            painter.setFont(name_font)
+            name_metrics = QFontMetrics(name_font)
+            name = name_metrics.elidedText(
+                node.display_name,
+                Qt.TextElideMode.ElideRight,
+                max(20, round(name_right - content_left)),
+            )
+            painter.setPen(QColor(TEXT))
+            painter.drawText(
+                QRectF(content_left, y + 3, name_right - content_left, 22),
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                name,
+            )
+            painter.setFont(name_font)
+            painter.setPen(QColor(TEXT if selected else TEXT_MUTED))
+            painter.drawText(
+                QRectF(content_right - value_width, y + 3, value_width, 22),
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                 format_duration(node.milliseconds),
             )
+
+            track = QRectF(
+                content_left,
+                y + row_height - 17,
+                max(42.0, content_right - content_left),
+                7,
+            )
+            painter.setPen(Qt.PenStyle.NoPen)
+            track_color = QColor(BORDER_STRONG)
+            track_color.setAlpha(145)
+            painter.setBrush(track_color)
+            painter.drawRoundedRect(track, 3.5, 3.5)
+            fill = QRectF(
+                track.x(),
+                track.y(),
+                track.width() * (node.milliseconds / maximum),
+                track.height(),
+            )
+            painter.setBrush(fill_color)
+            painter.drawRoundedRect(fill, 3.5, 3.5)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt API
         hovered = next(
@@ -231,8 +260,14 @@ class TopFriendsBarChart(QWidget):
         hovered_id = hovered.user_id if hovered else None
         if hovered_id != self._hovered_id:
             self._hovered_id = hovered_id
+            self.setCursor(
+                Qt.CursorShape.PointingHandCursor
+                if hovered is not None
+                else Qt.CursorShape.ArrowCursor
+            )
             self.friend_hovered.emit(
                 (
+                    f"{format_duration(hovered.milliseconds)} with "
                     f"{hovered.display_name} · "
                     f"{hovered.sessions} session"
                     f"{'s' if hovered.sessions != 1 else ''}"
@@ -244,6 +279,7 @@ class TopFriendsBarChart(QWidget):
 
     def leaveEvent(self, _event) -> None:  # noqa: N802 - Qt API
         self._hovered_id = None
+        self.setCursor(Qt.CursorShape.ArrowCursor)
         self.friend_hovered.emit("")
         self.update()
 
@@ -262,7 +298,6 @@ class TopFriendsBarChart(QWidget):
             if rect.contains(event.position()):
                 self.friend_activated.emit(node.user_id)
                 return
-
 
 class FriendMapWidget(QWidget):
     friend_selected = Signal(str)
@@ -336,22 +371,32 @@ class FriendMapWidget(QWidget):
         ):
             self._selected_group = 0
         if color_mode == "Origins":
-            self._connection_metric = "Introduction confidence"
+            self._connection_metric = "Introduction evidence"
             self._root_children = set()
             tree_links: list[FriendMapLink] = []
+            minimum_evidence = (
+                0.75
+                if connection_detail == "Focused"
+                else 0.55
+                if connection_detail == "Balanced"
+                else 0.0
+            )
             for node in self._nodes:
                 introduction = self._introductions.get(node.user_id)
                 parent_id = introduction.parent_user_id if introduction else None
-                if parent_id not in visible_ids:
+                if (
+                    parent_id not in visible_ids
+                    or introduction.evidence_score < minimum_evidence
+                ):
                     self._root_children.add(node.user_id)
                     continue
                 tree_links.append(
                     FriendMapLink(
                         source_user_id=parent_id,
                         target_user_id=node.user_id,
-                        milliseconds=round(introduction.confidence * 1000),
+                        milliseconds=round(introduction.evidence_score * 1000),
                         encounters=1,
-                        likelihood=introduction.confidence,
+                        likelihood=introduction.evidence_score,
                     )
                 )
             candidates = sorted(tree_links, key=lambda link: -link.likelihood)
@@ -419,6 +464,9 @@ class FriendMapWidget(QWidget):
 
     def introduction_for(self, user_id: str) -> FriendIntroduction | None:
         return self._introductions.get(user_id)
+
+    def introduction_path_visible(self, user_id: str) -> bool:
+        return any(link.target_user_id == user_id for link in self._links)
 
     def visible_counts(self) -> tuple[int, int]:
         return len(self._nodes), len(self._links)
@@ -522,7 +570,7 @@ class FriendMapWidget(QWidget):
             link.likelihood
             if self._connection_metric in (
                 "Co-appearance likelihood",
-                "Introduction confidence",
+                "Introduction evidence",
             )
             else float(link.milliseconds)
         )
@@ -539,9 +587,9 @@ class FriendMapWidget(QWidget):
             introduction = self._introductions.get(node.user_id)
             if introduction is None or introduction.parent_user_id is None:
                 return QColor("#778394")
-            if introduction.confidence >= 0.7:
+            if introduction.evidence_score >= 0.75:
                 return QColor("#65b98a")
-            if introduction.confidence >= 0.5:
+            if introduction.evidence_score >= 0.55:
                 return QColor("#55c7d8")
             return QColor("#f0b35a")
         return activity_rank_color(index + 1)
@@ -549,6 +597,48 @@ class FriendMapWidget(QWidget):
     def reset_view(self) -> None:
         self._zoom = 1.0
         self._pan = QPointF()
+        self.update()
+
+    def zoom_in(self) -> None:
+        self._zoom = min(3.2, self._zoom * 1.22)
+        self.update()
+
+    def zoom_out(self) -> None:
+        self._zoom = max(0.55, self._zoom / 1.22)
+        self.update()
+
+    def focus_on_friend(self, user_id: str) -> None:
+        if self._color_mode != "Origins" or user_id not in self._positions:
+            return
+        focused_ids = self._origin_focus_ids(user_id)
+        positions = [self._positions[item] for item in focused_ids]
+        positions.append(self._root_position)
+        minimum_x = min(point.x() for point in positions)
+        maximum_x = max(point.x() for point in positions)
+        minimum_y = min(point.y() for point in positions)
+        maximum_y = max(point.y() for point in positions)
+        span_x = max(0.32, maximum_x - minimum_x)
+        span_y = max(0.32, maximum_y - minimum_y)
+        base_horizontal = max(90.0, (self.width() - 120) * 0.50)
+        base_vertical = max(90.0, (self.height() - 92) * 0.50)
+        self._zoom = min(
+            2.5,
+            max(
+                0.8,
+                min(
+                    (self.width() - 190) / (span_x * base_horizontal),
+                    (self.height() - 150) / (span_y * base_vertical),
+                ),
+            ),
+        )
+        midpoint = QPointF(
+            (minimum_x + maximum_x) / 2,
+            (minimum_y + maximum_y) / 2,
+        )
+        self._pan = QPointF(
+            -midpoint.x() * base_horizontal * self._zoom,
+            -midpoint.y() * base_vertical * self._zoom,
+        )
         self.update()
 
     def _calculate_layout(self) -> None:
@@ -718,10 +808,12 @@ class FriendMapWidget(QWidget):
         """Lay out the inferred single-parent graph as a left-to-right tree."""
 
         visible_ids = {node.user_id for node in self._nodes}
+        active_parent = {
+            link.target_user_id: link.source_user_id for link in self._links
+        }
         children: dict[str | None, list[str]] = {None: []}
         for node in self._nodes:
-            introduction = self._introductions.get(node.user_id)
-            parent_id = introduction.parent_user_id if introduction else None
+            parent_id = active_parent.get(node.user_id)
             if parent_id not in visible_ids:
                 parent_id = None
             children.setdefault(parent_id, []).append(node.user_id)
@@ -754,18 +846,36 @@ class FriendMapWidget(QWidget):
         by_depth: dict[int, list[str]] = {}
         for user_id in visible_ids:
             by_depth.setdefault(depths.get(user_id, 1), []).append(user_id)
+        layer_step = 1.42 / max(1, maximum_depth - 1)
+        max_rows = 28 if len(self._nodes) > 60 else 34
         for depth, members in by_depth.items():
             members.sort(key=lambda user_id: leaf_y.get(user_id, 0.0))
-            for index, user_id in enumerate(members):
-                x = -0.62 + (depth - 1) * (
-                    1.42 / max(1, maximum_depth - 1)
-                )
-                y = (
+            column_count = max(1, math.ceil(len(members) / max_rows))
+            column_sizes = [
+                len(members) // column_count
+                + (1 if column < len(members) % column_count else 0)
+                for column in range(column_count)
+            ]
+            layer_center = -0.62 + (depth - 1) * layer_step
+            spread = min(0.22, layer_step * 0.58)
+            member_index = 0
+            for column, column_size in enumerate(column_sizes):
+                column_offset = (
                     0.0
-                    if len(members) == 1
-                    else -0.82 + index * (1.64 / (len(members) - 1))
+                    if column_count == 1
+                    else -spread / 2 + column * spread / (column_count - 1)
                 )
-                self._positions[user_id] = QPointF(x, y)
+                for row in range(column_size):
+                    user_id = members[member_index]
+                    member_index += 1
+                    y = (
+                        0.0
+                        if column_size == 1
+                        else -0.82 + row * (1.64 / (column_size - 1))
+                    )
+                    self._positions[user_id] = QPointF(
+                        layer_center + column_offset, y
+                    )
 
     def _screen_point(self, position: QPointF) -> QPointF:
         center = QPointF(self.width() / 2, (self.height() - 40) / 2) + self._pan
@@ -783,12 +893,14 @@ class FriendMapWidget(QWidget):
 
     def _node_radius(self, node: FriendMapNode) -> float:
         maximum = max((item.milliseconds for item in self._nodes), default=1)
-        if self._color_mode == "Origins" and len(self._nodes) > 60:
-            minimum, maximum_radius = 4.0, 7.0
+        if self._color_mode == "Origins" and len(self._nodes) > 100:
+            minimum, maximum_radius = 7.0, 10.5
+        elif self._color_mode == "Origins" and len(self._nodes) > 60:
+            minimum, maximum_radius = 7.5, 11.0
         elif self._color_mode == "Origins" and len(self._nodes) > 30:
-            minimum, maximum_radius = 5.0, 9.0
+            minimum, maximum_radius = 8.0, 13.0
         elif self._color_mode == "Origins":
-            minimum, maximum_radius = 8.0, 16.0
+            minimum, maximum_radius = 9.0, 17.0
         elif len(self._nodes) > 150:
             minimum, maximum_radius = 3.5, 9.0
         elif len(self._nodes) > 80:
@@ -826,13 +938,30 @@ class FriendMapWidget(QWidget):
             )
             return
 
+        focused_id = self._selected_id or self._hovered_id
+        focused_ids = self._focused_ids(focused_id)
+        if not focused_ids and self._hovered_link is not None:
+            focused_ids.update(
+                (
+                    self._hovered_link.source_user_id,
+                    self._hovered_link.target_user_id,
+                )
+            )
         center = self._screen_point(self._root_position)
         maximum_link = max((self._link_value(link) for link in self._links), default=1)
         points = {
             node.user_id: self._screen_point(self._positions[node.user_id])
             for node in self._nodes
         }
-        radii = {node.user_id: self._node_radius(node) for node in self._nodes}
+        radii = {
+            node.user_id: max(
+                self._node_radius(node),
+                13.0
+                if self._color_mode == "Origins" and node.user_id in focused_ids
+                else 0.0,
+            )
+            for node in self._nodes
+        }
         self._node_rects = {
             node.user_id: QRectF(
                 points[node.user_id].x() - radii[node.user_id],
@@ -886,25 +1015,6 @@ class FriendMapWidget(QWidget):
         active_group_ids = {
             node.user_id for node in self.group_members(self._selected_group)
         } if self._selected_group else set()
-        focused_id = self._selected_id or self._hovered_id
-        focused_ids: set[str] = set()
-        if focused_id:
-            if self._color_mode == "Origins":
-                focused_ids = self._origin_focus_ids(focused_id)
-            else:
-                focused_ids.add(focused_id)
-                for link in self._links:
-                    if link.source_user_id == focused_id:
-                        focused_ids.add(link.target_user_id)
-                    elif link.target_user_id == focused_id:
-                        focused_ids.add(link.source_user_id)
-        elif self._hovered_link is not None:
-            focused_ids.update(
-                (
-                    self._hovered_link.source_user_id,
-                    self._hovered_link.target_user_id,
-                )
-            )
         strongest_link = None
         if focused_id:
             strongest = self.strongest_connection(focused_id)
@@ -920,24 +1030,45 @@ class FriendMapWidget(QWidget):
                 root_color = QColor("#778394")
                 on_path = not focused_ids or child_id in focused_ids
                 root_color.setAlpha(
-                    190 if on_path and focused_ids else 100 if known_date and on_path else 55 if on_path else 8
+                    190
+                    if on_path and focused_ids
+                    else 38
+                    if known_date and on_path
+                    else 22
+                    if on_path
+                    else 8
                 )
                 style = Qt.PenStyle.DashLine if known_date else Qt.PenStyle.DotLine
-                painter.setPen(QPen(root_color, 2.2 if focused_ids and on_path else 1.2, style))
-                painter.drawLine(center, second)
+                painter.setPen(
+                    QPen(
+                        root_color,
+                        2.2 if focused_ids and on_path else 0.9,
+                        style,
+                    )
+                )
+                path = QPainterPath(center)
+                midpoint = (center.x() + second.x()) / 2
+                path.cubicTo(
+                    midpoint,
+                    center.y(),
+                    midpoint,
+                    second.y(),
+                    second.x(),
+                    second.y(),
+                )
+                painter.drawPath(path)
 
         for link in sorted(self._links, key=self._link_value):
             first = points[link.source_user_id]
             second = points[link.target_user_id]
-            self._edge_segments.append((first, second, link))
             ratio = self._link_visual_ratio(link, maximum_link)
             color = QColor(
                 "#65b98a"
-                if self._connection_metric == "Introduction confidence"
-                and link.likelihood >= 0.7
+                if self._connection_metric == "Introduction evidence"
+                and link.likelihood >= 0.75
                 else "#f0b35a"
-                if self._connection_metric == "Introduction confidence"
-                and link.likelihood < 0.5
+                if self._connection_metric == "Introduction evidence"
+                and link.likelihood < 0.55
                 else "#cf8cff"
                 if self._connection_metric == "Co-appearance likelihood"
                 else "#62c9d7"
@@ -971,11 +1102,30 @@ class FriendMapWidget(QWidget):
                 width += 1.5
             style = (
                 Qt.PenStyle.DashLine
-                if self._color_mode == "Origins" and link.likelihood < 0.7
+                if self._color_mode == "Origins" and link.likelihood < 0.75
                 else Qt.PenStyle.SolidLine
             )
             painter.setPen(QPen(color, width, style))
-            painter.drawLine(first, second)
+            if self._color_mode == "Origins":
+                path = QPainterPath(first)
+                midpoint = (first.x() + second.x()) / 2
+                path.cubicTo(
+                    midpoint,
+                    first.y(),
+                    midpoint,
+                    second.y(),
+                    second.x(),
+                    second.y(),
+                )
+                painter.drawPath(path)
+                previous = path.pointAtPercent(0.0)
+                for step in range(1, 13):
+                    current = path.pointAtPercent(step / 12)
+                    self._edge_segments.append((previous, current, link))
+                    previous = current
+            else:
+                painter.drawLine(first, second)
+                self._edge_segments.append((first, second, link))
 
         center_glow = QColor(ACCENT)
         center_glow.setAlpha(38)
@@ -1157,23 +1307,36 @@ class FriendMapWidget(QWidget):
         return None
 
     def _origin_path_ids(self, user_id: str) -> set[str]:
+        active_parent = {
+            link.target_user_id: link.source_user_id for link in self._links
+        }
         path: set[str] = set()
         current_id: str | None = user_id
         while current_id is not None and current_id not in path:
             path.add(current_id)
-            introduction = self._introductions.get(current_id)
-            current_id = introduction.parent_user_id if introduction else None
-            if current_id not in self._introductions:
-                current_id = None
+            current_id = active_parent.get(current_id)
         return path
 
     def _origin_focus_ids(self, user_id: str) -> set[str]:
         focused = self._origin_path_ids(user_id)
         focused.update(
-            child_id
-            for child_id, introduction in self._introductions.items()
-            if introduction.parent_user_id == user_id
+            link.target_user_id
+            for link in self._links
+            if link.source_user_id == user_id
         )
+        return focused
+
+    def _focused_ids(self, focused_id: str | None) -> set[str]:
+        if focused_id is None:
+            return set()
+        if self._color_mode == "Origins":
+            return self._origin_focus_ids(focused_id)
+        focused = {focused_id}
+        for link in self._links:
+            if link.source_user_id == focused_id:
+                focused.add(link.target_user_id)
+            elif link.target_user_id == focused_id:
+                focused.add(link.source_user_id)
         return focused
 
     def _group_at(self, position: QPointF) -> int:
@@ -1252,9 +1415,9 @@ class FriendMapWidget(QWidget):
             nodes = {node.user_id: node for node in self._nodes}
             first = nodes[hovered_link.source_user_id]
             second = nodes[hovered_link.target_user_id]
-            if self._connection_metric == "Introduction confidence":
-                metric_name = "Possible introduction confidence"
-                value = f"{hovered_link.likelihood:.0%}"
+            if self._connection_metric == "Introduction evidence":
+                metric_name = "Introduction evidence score"
+                value = f"{hovered_link.likelihood * 100:.0f} / 100"
             elif self._connection_metric == "Co-appearance likelihood":
                 metric_name = "Co-appearance likelihood"
                 value = f"{hovered_link.likelihood:.0%}"
@@ -1294,12 +1457,18 @@ class FriendMapWidget(QWidget):
                 if introduction and introduction.parent_user_id
                 else "YOU / no credible introducer observed"
             )
-            confidence = (
-                f"{introduction.confidence:.0%} confidence"
+            evidence_score = (
+                f"{introduction.evidence_score * 100:.0f} / 100"
                 if introduction and introduction.parent_user_id
                 else "unresolved"
             )
             evidence = introduction.evidence if introduction else "No history evidence available."
+            if (
+                introduction
+                and introduction.parent_user_id
+                and not self.introduction_path_visible(hovered)
+            ):
+                evidence += " Choose Balanced or All connections to display this path."
             friend_since = (
                 format_local_datetime(introduction.befriended_at)
                 if introduction and introduction.befriended_at
@@ -1309,7 +1478,7 @@ class FriendMapWidget(QWidget):
                 event.globalPosition().toPoint() + QPoint(18, 20),
                 f"<div style='min-width:260px'><b>{node.display_name}</b><br>"
                 f"<span style='color:#9fb1c8'>Possible path via</span> {parent_name}<br>"
-                f"<span style='color:#9fb1c8'>Confidence</span> {confidence}<br>"
+                f"<span style='color:#9fb1c8'>Evidence score</span> {evidence_score}<br>"
                 f"<span style='color:#9fb1c8'>Friendship recorded</span> {friend_since}"
                 f"<br><br>{evidence}<br><br>"
                 "<span style='color:#9fb1c8'>The highlighted route shows the possible path "

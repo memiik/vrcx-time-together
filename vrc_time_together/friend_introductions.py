@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from .models import FriendIntroduction
+
+
+EVENT_TOLERANCE = timedelta(minutes=15)
+PRIOR_SESSION_GAP = timedelta(minutes=1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -14,22 +19,94 @@ class IntroductionSession:
     location: str
 
 
+@dataclass(frozen=True, slots=True)
+class _CandidateEvidence:
+    parent_id: str
+    exact: bool
+    distance_seconds: float
+    event_overlap_ms: int
+    parent_was_present_first: bool
+    prior_encounters: int
+    prior_milliseconds: int
+
+
+def _overlap(
+    first: IntroductionSession, second: IntroductionSession
+) -> tuple[datetime, datetime, int]:
+    start = max(first.start, second.start)
+    end = min(first.end, second.end)
+    milliseconds = max(0, round((end - start).total_seconds() * 1000))
+    return start, end, milliseconds
+
+
+def _prior_evidence(
+    child_sessions: list[IntroductionSession],
+    parent_sessions: list[IntroductionSession],
+    cutoff: datetime,
+) -> tuple[int, int]:
+    encounters = 0
+    milliseconds = 0
+    for child_session in child_sessions:
+        if child_session.start >= cutoff:
+            continue
+        for parent_session in parent_sessions:
+            if child_session.location != parent_session.location:
+                continue
+            _start, end, overlap_ms = _overlap(child_session, parent_session)
+            if overlap_ms > 0 and end <= cutoff:
+                encounters += 1
+                milliseconds += overlap_ms
+    return encounters, milliseconds
+
+
+def _candidate_score(candidate: _CandidateEvidence, candidate_count: int) -> float:
+    if candidate.exact:
+        timing_points = 40.0
+    else:
+        tolerance_seconds = EVENT_TOLERANCE.total_seconds()
+        timing_points = 18.0 + 12.0 * max(
+            0.0, 1.0 - candidate.distance_seconds / tolerance_seconds
+        )
+    overlap_minutes = candidate.event_overlap_ms / 60_000
+    overlap_points = 10.0 * min(
+        1.0, math.log1p(overlap_minutes) / math.log1p(240)
+    )
+    arrival_points = 15.0 if candidate.parent_was_present_first else 4.0
+    prior_minutes = candidate.prior_milliseconds / 60_000
+    prior_points = min(15.0, candidate.prior_encounters * 5.0) + 10.0 * min(
+        1.0, math.log1p(prior_minutes) / math.log1p(600)
+    )
+    specificity_points = 10.0 / math.sqrt(max(1, candidate_count))
+    return min(
+        0.95,
+        (
+            timing_points
+            + overlap_points
+            + arrival_points
+            + prior_points
+            + specificity_points
+        )
+        / 100.0,
+    )
+
+
 def infer_introductions(
     user_ids: tuple[str, ...],
     friendship_dates: dict[str, datetime],
     sessions: tuple[IntroductionSession, ...],
 ) -> tuple[FriendIntroduction, ...]:
-    """Build a conservative, acyclic tree from friendship and co-presence evidence.
+    """Build a conservative, acyclic tree from temporal co-presence evidence.
 
-    This cannot establish who actually introduced two people. A parent is selected only
-    when they were already a friend and were recorded in the same known instance close
-    to the child's friendship event.
+    The result ranks possible introduction paths. Its score summarizes evidence
+    quality and is deliberately not presented as a probability.
     """
 
     by_user: dict[str, list[IntroductionSession]] = {}
     for session in sessions:
-        if session.location:
+        if session.location and session.start < session.end:
             by_user.setdefault(session.user_id, []).append(session)
+    for user_sessions in by_user.values():
+        user_sessions.sort(key=lambda item: item.start)
 
     results: list[FriendIntroduction] = []
     for child_id in user_ids:
@@ -40,83 +117,161 @@ def infer_introductions(
                     child_user_id=child_id,
                     parent_user_id=None,
                     befriended_at=None,
-                    confidence=0.0,
+                    evidence_score=0.0,
                     evidence="No friendship timestamp is available in the recorded VRCX history.",
                     timestamp_source="unavailable",
                 )
             )
             continue
 
-        child_sessions = [
+        all_child_sessions = by_user.get(child_id, [])
+        event_sessions = [
             item
-            for item in by_user.get(child_id, ())
-            if item.start - timedelta(minutes=15)
+            for item in all_child_sessions
+            if item.start - EVENT_TOLERANCE
             <= befriended_at
-            <= item.end + timedelta(minutes=15)
+            <= item.end + EVENT_TOLERANCE
         ]
-        candidates: list[tuple[float, int, str, bool]] = []
+        candidates: list[_CandidateEvidence] = []
         for parent_id in user_ids:
             parent_date = friendship_dates.get(parent_id)
-            if parent_id == child_id or parent_date is None or parent_date >= befriended_at:
+            if (
+                parent_id == child_id
+                or parent_date is None
+                or parent_date >= befriended_at
+            ):
                 continue
-            best_overlap = 0
-            exact = False
-            for child_session in child_sessions:
-                for parent_session in by_user.get(parent_id, ()):
+            parent_sessions = by_user.get(parent_id, [])
+            best_event: tuple[
+                tuple[int, float, int, int],
+                IntroductionSession,
+                bool,
+                float,
+                int,
+                bool,
+            ] | None = None
+            for child_session in event_sessions:
+                for parent_session in parent_sessions:
                     if child_session.location != parent_session.location:
                         continue
-                    overlap_start = max(child_session.start, parent_session.start)
-                    overlap_end = min(child_session.end, parent_session.end)
-                    overlap_ms = max(
-                        0,
-                        round((overlap_end - overlap_start).total_seconds() * 1000),
+                    overlap_start, overlap_end, overlap_ms = _overlap(
+                        child_session, parent_session
                     )
                     if overlap_ms <= 0:
                         continue
-                    contains_event = overlap_start <= befriended_at <= overlap_end
-                    if contains_event or overlap_ms > best_overlap:
-                        exact = exact or contains_event
-                        best_overlap = max(best_overlap, overlap_ms)
-            if best_overlap:
-                score = (1.0 if exact else 0.72) + min(best_overlap / 14_400_000, 0.18)
-                candidates.append((score, best_overlap, parent_id, exact))
+                    exact = overlap_start <= befriended_at <= overlap_end
+                    distance_seconds = (
+                        0.0
+                        if exact
+                        else min(
+                            abs((befriended_at - overlap_start).total_seconds()),
+                            abs((befriended_at - overlap_end).total_seconds()),
+                        )
+                    )
+                    if distance_seconds > EVENT_TOLERANCE.total_seconds():
+                        continue
+                    present_first = (
+                        parent_session.start
+                        <= child_session.start + timedelta(minutes=2)
+                    )
+                    rank = (
+                        1 if exact else 0,
+                        -distance_seconds,
+                        1 if present_first else 0,
+                        overlap_ms,
+                    )
+                    if best_event is None or rank > best_event[0]:
+                        best_event = (
+                            rank,
+                            child_session,
+                            exact,
+                            distance_seconds,
+                            overlap_ms,
+                            present_first,
+                        )
+            if best_event is None:
+                continue
+            _, child_event_session, exact, distance_seconds, overlap_ms, present_first = (
+                best_event
+            )
+            prior_encounters, prior_milliseconds = _prior_evidence(
+                all_child_sessions,
+                parent_sessions,
+                child_event_session.start - PRIOR_SESSION_GAP,
+            )
+            candidates.append(
+                _CandidateEvidence(
+                    parent_id=parent_id,
+                    exact=exact,
+                    distance_seconds=distance_seconds,
+                    event_overlap_ms=overlap_ms,
+                    parent_was_present_first=present_first,
+                    prior_encounters=prior_encounters,
+                    prior_milliseconds=prior_milliseconds,
+                )
+            )
 
-        candidates.sort(key=lambda item: (-item[0], -item[1], item[2]))
-        if not candidates:
+        candidate_count = len(candidates)
+        scored = sorted(
+            (
+                (_candidate_score(candidate, candidate_count), candidate)
+                for candidate in candidates
+            ),
+            key=lambda item: (
+                -item[0],
+                -item[1].prior_encounters,
+                -item[1].prior_milliseconds,
+                item[1].parent_id,
+            ),
+        )
+        if not scored:
             results.append(
                 FriendIntroduction(
                     child_user_id=child_id,
                     parent_user_id=None,
                     befriended_at=befriended_at,
-                    confidence=0.0,
+                    evidence_score=0.0,
                     evidence=(
-                        "No earlier friend was recorded in the same known instance when "
-                        "this friendship began."
+                        "No earlier friend was recorded in the same known instance within "
+                        "15 minutes of this friendship event."
                     ),
                 )
             )
             continue
 
-        best_score, overlap_ms, parent_id, exact = candidates[0]
-        alternatives = tuple(item[2] for item in candidates[1:4])
-        ambiguity_penalty = min(0.24, len(candidates[1:]) * 0.08)
-        confidence = max(0.35, min(0.88, 0.82 if exact else 0.58) - ambiguity_penalty)
-        overlap_minutes = max(1, round(overlap_ms / 60_000))
-        timing = "at the friendship timestamp" if exact else "around the friendship event"
-        evidence = (
-            f"Recorded together in the same known instance {timing} "
-            f"({overlap_minutes} min overlapping session evidence)."
-        )
-        if alternatives:
-            evidence += f" {len(alternatives)} other plausible earlier friend(s) were present."
+        evidence_score, best = scored[0]
+        alternatives = tuple(candidate.parent_id for _score, candidate in scored[1:4])
+        overlap_minutes = max(1, round(best.event_overlap_ms / 60_000))
+        if best.exact:
+            timing = "Present in the same known instance at the friendship timestamp"
+        else:
+            timing = (
+                "Present in the same known instance "
+                f"{max(1, round(best.distance_seconds / 60))} min from the friendship event"
+            )
+        factors = [f"{timing}; {overlap_minutes} min of overlapping session time"]
+        if best.parent_was_present_first:
+            factors.append("already present when that session began")
+        if best.prior_encounters:
+            factors.append(
+                f"{best.prior_encounters} earlier shared-instance encounter"
+                f"{'s' if best.prior_encounters != 1 else ''}"
+            )
+        if candidate_count > 1:
+            factors.append(f"chosen from {candidate_count} plausible people present")
         results.append(
             FriendIntroduction(
                 child_user_id=child_id,
-                parent_user_id=parent_id,
+                parent_user_id=best.parent_id,
                 befriended_at=befriended_at,
-                confidence=confidence,
-                evidence=evidence,
+                evidence_score=evidence_score,
+                evidence="; ".join(factors) + ".",
                 alternative_parent_ids=alternatives,
+                candidate_count=candidate_count,
+                exact_event_overlap=best.exact,
+                prior_encounters=best.prior_encounters,
+                prior_milliseconds=best.prior_milliseconds,
+                parent_was_present_first=best.parent_was_present_first,
             )
         )
 

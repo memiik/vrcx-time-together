@@ -103,7 +103,7 @@ class FriendIntroductionTests(unittest.TestCase):
 
         child = next(item for item in introductions if item.child_user_id == "child")
         self.assertEqual(child.parent_user_id, "earlier")
-        self.assertGreaterEqual(child.confidence, 0.7)
+        self.assertGreaterEqual(child.evidence_score, 0.7)
         self.assertNotEqual(child.parent_user_id, "later")
 
     def test_falls_back_to_you_without_same_instance_evidence(self) -> None:
@@ -119,7 +119,60 @@ class FriendIntroductionTests(unittest.TestCase):
 
         child = next(item for item in introductions if item.child_user_id == "child")
         self.assertIsNone(child.parent_user_id)
-        self.assertEqual(child.confidence, 0.0)
+        self.assertEqual(child.evidence_score, 0.0)
+
+    def test_prior_shared_instance_history_breaks_an_ambiguous_event_tie(self) -> None:
+        base = datetime(2026, 1, 10, 18, 0, tzinfo=LOCAL_TIMEZONE)
+        prior_start = base - timedelta(days=2)
+        introductions = infer_introductions(
+            ("known", "other", "child"),
+            {
+                "known": base - timedelta(days=60),
+                "other": base - timedelta(days=30),
+                "child": base,
+            },
+            (
+                IntroductionSession(
+                    "known", prior_start, prior_start + timedelta(hours=2), "prior:1"
+                ),
+                IntroductionSession(
+                    "child", prior_start, prior_start + timedelta(hours=2), "prior:1"
+                ),
+                IntroductionSession(
+                    "known", base - timedelta(hours=1), base + timedelta(hours=1), "event:1"
+                ),
+                IntroductionSession(
+                    "other", base - timedelta(hours=1), base + timedelta(hours=1), "event:1"
+                ),
+                IntroductionSession(
+                    "child", base - timedelta(minutes=30), base + timedelta(hours=1), "event:1"
+                ),
+            ),
+        )
+
+        child = next(item for item in introductions if item.child_user_id == "child")
+        self.assertEqual(child.parent_user_id, "known")
+        self.assertEqual(child.candidate_count, 2)
+        self.assertEqual(child.prior_encounters, 1)
+        self.assertEqual(child.alternative_parent_ids, ("other",))
+
+    def test_rejects_overlap_far_from_the_friendship_event(self) -> None:
+        base = datetime(2026, 1, 10, 18, 0, tzinfo=LOCAL_TIMEZONE)
+        introductions = infer_introductions(
+            ("earlier", "child"),
+            {"earlier": base - timedelta(days=30), "child": base},
+            (
+                IntroductionSession(
+                    "child", base - timedelta(hours=1), base + timedelta(hours=1), "world:1"
+                ),
+                IntroductionSession(
+                    "earlier", base - timedelta(hours=1), base - timedelta(minutes=30), "world:1"
+                ),
+            ),
+        )
+
+        child = next(item for item in introductions if item.child_user_id == "child")
+        self.assertIsNone(child.parent_user_id)
 
 
 class RepositoryTests(unittest.TestCase):
@@ -294,7 +347,8 @@ class RepositoryTests(unittest.TestCase):
                 """
             )
             connection.execute(
-                "INSERT INTO usr_test_friend_log_history VALUES (1, ?, 'Friend', 'usr_a', 'Alpha')",
+                "INSERT INTO usr_test_friend_log_history "
+                "VALUES (1, ?, 'Friend', 'usr_a', 'Alpha')",
                 (sqlite_timestamp(local_start - timedelta(days=30)),),
             )
             connection.execute(
@@ -311,7 +365,7 @@ class RepositoryTests(unittest.TestCase):
         )
 
         self.assertEqual(beta.parent_user_id, "usr_a")
-        self.assertGreaterEqual(beta.confidence, 0.7)
+        self.assertGreaterEqual(beta.evidence_score, 0.7)
         self.assertEqual(data.links[0].likelihood, 0.5)
 
     def test_friend_map_does_not_infer_connections_without_location(self) -> None:

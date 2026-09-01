@@ -48,10 +48,21 @@ class FriendIntroduction:
     child_user_id: str
     parent_user_id: str | None
     befriended_at: datetime | None
-    confidence: float
+    evidence_score: float
     evidence: str
     alternative_parent_ids: tuple[str, ...] = tuple()
     timestamp_source: str = "friend_event"
+    candidate_count: int = 0
+    exact_event_overlap: bool = False
+    prior_encounters: int = 0
+    prior_milliseconds: int = 0
+    parent_was_present_first: bool = False
+
+    @property
+    def confidence(self) -> float:
+        """Compatibility alias; this is an evidence score, not a probability."""
+
+        return self.evidence_score
 
 
 @dataclass(frozen=True, slots=True)

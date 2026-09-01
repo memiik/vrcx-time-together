@@ -78,6 +78,11 @@ QFrame#DetailStrip {{
     border: 1px solid {BORDER};
     border-radius: 8px;
 }}
+QFrame#MapDetailPanel {{
+    background: {SURFACE_RAISED};
+    border: 1px solid {BORDER_STRONG};
+    border-radius: 10px;
+}}
 QFrame#InlineDatePanel {{
     background: {SIDEBAR};
     border-bottom: 1px solid {BORDER_STRONG};
@@ -127,14 +132,36 @@ QLabel#MetricDetail {{
     color: {TEXT_MUTED};
     font-size: 9px;
 }}
+QLabel#MapControlLabel {{
+    color: {TEXT_MUTED};
+    font-size: 11px;
+    font-weight: 600;
+}}
+QLabel#MapHelperText {{
+    color: {TEXT_MUTED};
+    font-size: 11px;
+}}
+QLabel#MapDetailTitle {{
+    color: {TEXT};
+    font-size: 16px;
+    font-weight: 700;
+}}
+QLabel#MapDetailMeta {{
+    color: {ACCENT_HOVER};
+    font-size: 11px;
+    font-weight: 600;
+}}
+QWidget#MapInspectorMetric {{
+    min-height: 40px;
+}}
 QLabel#MapInspectorValue {{
     color: {TEXT};
-    font-size: 14px;
+    font-size: 16px;
     font-weight: 700;
 }}
 QLabel#MapInspectorLabel {{
     color: {TEXT_MUTED};
-    font-size: 9px;
+    font-size: 11px;
 }}
 QLabel#KpiInfo {{
     color: {TEXT_MUTED};
@@ -239,15 +266,37 @@ QPushButton#QuietButton:hover {{
     color: {TEXT};
     background: {SURFACE_RAISED};
 }}
+QPushButton#MapZoomButton {{
+    min-width: 32px;
+    max-width: 32px;
+    min-height: 32px;
+    max-height: 32px;
+    padding: 0;
+    color: {TEXT};
+    background: {SURFACE};
+    border: 1px solid {BORDER_STRONG};
+    border-radius: 7px;
+}}
+QPushButton#MapZoomButton:hover {{
+    color: white;
+    background: {SURFACE_RAISED};
+    border-color: {ACCENT};
+}}
+QPushButton#MapZoomButton:pressed {{
+    background: {ACCENT_SOFT};
+}}
+QPushButton#MapZoomButton:focus {{
+    border-color: {ACCENT};
+}}
 QPushButton#MapSegmentButton {{
-    min-height: 28px;
-    padding: 0 10px;
+    min-height: 32px;
+    padding: 0 11px;
     color: {TEXT_MUTED};
     background: {SURFACE};
     border: 1px solid {BORDER};
     border-right: 0;
     border-radius: 0;
-    font-size: 9px;
+    font-size: 10px;
     font-weight: 650;
 }}
 QPushButton#MapSegmentButton[segmentPosition="first"] {{
@@ -268,6 +317,10 @@ QPushButton#MapSegmentButton:checked {{
     background: {ACCENT_SOFT};
     border-color: {ACCENT};
     border-right: 1px solid {ACCENT};
+}}
+QPushButton#MapSegmentButton:focus {{
+    color: {TEXT};
+    border-color: {ACCENT};
 }}
 QPushButton#PresetButton {{
     min-width: 94px;

@@ -690,7 +690,7 @@ class VrcxRepository:
                 }
             if friendship_dates:
                 introduction_parameters["intro_start"] = sqlite_timestamp(
-                    min(friendship_dates.values()) - timedelta(days=1)
+                    min(friendship_dates.values()) - timedelta(days=90)
                 )
                 introduction_parameters["intro_end"] = sqlite_timestamp(
                     max(friendship_dates.values()) + timedelta(days=1)
