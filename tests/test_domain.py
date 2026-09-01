@@ -12,7 +12,8 @@ from vrc_time_together.formatting import (
     format_english_date,
     format_english_day,
 )
-from vrc_time_together.models import AppState
+from vrc_time_together.friend_groups import detect_friend_groups
+from vrc_time_together.models import AppState, FriendMapLink, FriendMapNode
 from vrc_time_together.repository import (
     VrcxRepository,
     aggregate_time_series,
@@ -44,6 +45,33 @@ class FormattingTests(unittest.TestCase):
         weekly = aggregate_time_series(daily, "Weekly")
         self.assertEqual(len(weekly), 2)
         self.assertEqual(sum(value for _day, value in weekly), 45_000)
+
+
+class FriendGroupTests(unittest.TestCase):
+    def test_detects_two_strong_same_instance_communities(self) -> None:
+        nodes = tuple(
+            FriendMapNode(user_id, user_id.upper(), 3_600_000, 4)
+            for user_id in ("a", "b", "c", "d")
+        )
+        links = (
+            FriendMapLink("a", "b", 3_000_000, 5, 0.8),
+            FriendMapLink("c", "d", 2_800_000, 5, 0.75),
+            FriendMapLink("b", "c", 60_000, 1, 0.02),
+        )
+
+        groups = detect_friend_groups(nodes, links)
+
+        self.assertEqual(groups["a"], groups["b"])
+        self.assertEqual(groups["c"], groups["d"])
+        self.assertNotEqual(groups["a"], groups["c"])
+
+    def test_leaves_unmeasured_people_ungrouped(self) -> None:
+        nodes = (
+            FriendMapNode("a", "Alpha", 3_600_000, 2),
+            FriendMapNode("b", "Beta", 1_800_000, 1),
+        )
+
+        self.assertEqual(detect_friend_groups(nodes, tuple()), {"a": 0, "b": 0})
 
 
 class RepositoryTests(unittest.TestCase):
@@ -205,6 +233,29 @@ class RepositoryTests(unittest.TestCase):
         )
         self.assertEqual(len(data.nodes), 2)
         self.assertEqual(data.links, tuple())
+
+    def test_friend_map_can_load_every_active_friend_without_a_limit(self) -> None:
+        local_end = datetime.combine(
+            self.local_day,
+            datetime.min.time(),
+            tzinfo=LOCAL_TIMEZONE,
+        ).replace(hour=16)
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            connection.execute(
+                "INSERT INTO usr_test_friend_log_current VALUES (?, ?, '', ?)",
+                ("usr_c", "Gamma", 3),
+            )
+            connection.execute(
+                "INSERT INTO gamelog_join_leave VALUES "
+                "(3, ?, 'OnPlayerLeft', 'Gamma', '', 'usr_c', ?)",
+                (sqlite_timestamp(local_end), 60 * 60_000),
+            )
+            connection.commit()
+
+        repository = VrcxRepository(self.database_path)
+        state = AppState(self.local_day, self.local_day)
+        self.assertEqual(len(repository.load_friend_map(state, max_nodes=2).nodes), 2)
+        self.assertEqual(len(repository.load_friend_map(state, max_nodes=None).nodes), 3)
 
     def test_local_day_boundaries_cover_one_real_calendar_day(self) -> None:
         start, end = local_range_utc(self.local_day, self.local_day)

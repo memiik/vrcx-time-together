@@ -27,7 +27,7 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
+from PySide6.QtGui import QAction, QCloseEvent, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -50,6 +50,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
     QStackedWidget,
     QStatusBar,
@@ -82,6 +83,7 @@ from .qt_friend_map import (
     SegmentedControl,
     TopFriendsBarChart,
     activity_rank_legend_html,
+    friend_group_color,
 )
 from .qt_insights import (
     CalendarHeatmap,
@@ -572,6 +574,7 @@ class MainWindow(QMainWindow):
         self._friend_insights_data: FriendInsightsData | None = None
         self._friend_map_data: FriendMapData | None = None
         self._selected_map_friend_id: str | None = None
+        self._selected_map_group_id = 0
         self._settings = QSettings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION)
         self._dashboard_debounce = QTimer(self)
         self._dashboard_debounce.setSingleShot(True)
@@ -1210,6 +1213,9 @@ class MainWindow(QMainWindow):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.map_page_content = QWidget()
+        self.map_page_content.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         content_layout = QVBoxLayout(self.map_page_content)
         content_layout.setContentsMargins(0, 0, 4, 4)
         content_layout.setSpacing(10)
@@ -1218,6 +1224,7 @@ class MainWindow(QMainWindow):
         content_layout.addWidget(controls)
 
         self.map_visuals_host = QWidget()
+        self.map_visuals_host.setMinimumWidth(0)
         self.map_visuals_layout = QBoxLayout(
             QBoxLayout.Direction.LeftToRight, self.map_visuals_host
         )
@@ -1252,7 +1259,7 @@ class MainWindow(QMainWindow):
             return group
 
         self.map_friend_count = SegmentedControl(
-            ("12", "20", "30", "40"), "20"
+            ("12", "20", "30", "40", "All"), "20"
         )
         self.map_friend_count.value_changed.connect(self.render_friend_map)
         self.map_friends_control = control_group("Friends", self.map_friend_count)
@@ -1279,6 +1286,13 @@ class MainWindow(QMainWindow):
         )
         self.map_connection_metric.currentTextChanged.connect(self.render_friend_map)
         self.map_metric_control = control_group("Metric", self.map_connection_metric)
+        self.map_view_mode = SegmentedControl(("Activity", "Groups"), "Activity")
+        self.map_view_mode.setToolTip(
+            "Activity colors nodes by time rank. Groups detects communities from repeated "
+            "same-instance overlap; it does not assume those people are friends."
+        )
+        self.map_view_mode.value_changed.connect(self.render_friend_map)
+        self.map_view_control = control_group("View", self.map_view_mode)
         self.map_reset_button = QPushButton("Reset view")
         self.map_reset_button.clicked.connect(lambda: self.friend_map.reset_view())
         self._map_toolbar_compact: bool | None = None
@@ -1288,11 +1302,16 @@ class MainWindow(QMainWindow):
     def _build_map_network_panel(self) -> QFrame:
         self.map_panel = QFrame()
         self.map_panel.setObjectName("Panel")
+        self.map_panel.setMinimumWidth(0)
         map_layout = QVBoxLayout(self.map_panel)
         map_layout.setContentsMargins(12, 10, 12, 9)
         map_header = QHBoxLayout()
         self.map_context = QLabel("Open the map to load this date range")
         self.map_context.setObjectName("SectionTitle")
+        self.map_context.setWordWrap(True)
+        self.map_context.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         map_header.addWidget(self.map_context, 1)
         gesture_hint = QLabel("Drag to pan · Wheel to zoom")
         gesture_hint.setObjectName("Subtle")
@@ -1301,11 +1320,16 @@ class MainWindow(QMainWindow):
         self.friend_map = FriendMapWidget()
         self.friend_map.friend_selected.connect(self.show_map_friend)
         self.friend_map.friend_activated.connect(self.open_map_friend_insights)
+        self.friend_map.group_selected.connect(self.show_map_group)
         self.friend_map.selection_cleared.connect(self.clear_map_selection)
         map_layout.addWidget(self.friend_map, 1)
         legend_row = QHBoxLayout()
         self.map_legend = QLabel()
         self.map_legend.setObjectName("Muted")
+        self.map_legend.setWordWrap(True)
+        self.map_legend.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         legend_row.addWidget(self.map_legend, 1)
         help_button = QPushButton("?")
         help_button.setObjectName("QuietButton")
@@ -1315,6 +1339,10 @@ class MainWindow(QMainWindow):
             "• The number inside each node is that friend's activity rank for the selected period.\n"
             "• Node color groups ranks: purple is top 5, cyan is 6–10, blue is 11–20, "
             "and green is 21+.\n"
+            "• Groups view colors and positions inferred communities using repeated, measured "
+            "same-instance overlap. It cannot know whether two people are actually friends.\n"
+            "• Merely appearing in the same date range adds no group strength. Actual overlap "
+            "in the same known instance is the clustering evidence.\n"
             "• Larger nodes mean more recorded time around you.\n"
             "• Position is determined by the relationship network: friends with stronger "
             "measured overlap tend to sit closer together.\n"
@@ -1335,15 +1363,49 @@ class MainWindow(QMainWindow):
         self.map_ranking_panel.setObjectName("Panel")
         ranking_layout = QVBoxLayout(self.map_ranking_panel)
         ranking_layout.setContentsMargins(12, 10, 12, 10)
+        ranking_layout.setSpacing(8)
+        self.map_group_explorer = QWidget()
+        explorer_layout = QVBoxLayout(self.map_group_explorer)
+        explorer_layout.setContentsMargins(0, 0, 0, 4)
+        explorer_layout.setSpacing(5)
+        explorer_label = QLabel("EXPLORE GROUP")
+        explorer_label.setObjectName("MetricLabel")
+        explorer_layout.addWidget(explorer_label)
+        self.map_group_filter = QComboBox()
+        self.map_group_filter.setToolTip(
+            "Focus one inferred group to make large maps easier to read."
+        )
+        self.map_group_filter.currentIndexChanged.connect(
+            self.select_map_group_from_filter
+        )
+        explorer_layout.addWidget(self.map_group_filter)
+        self.map_group_summary = QLabel()
+        self.map_group_summary.setObjectName("Subtle")
+        self.map_group_summary.setWordWrap(True)
+        self.map_group_summary.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        explorer_layout.addWidget(self.map_group_summary)
+        self.map_group_explorer.hide()
+        ranking_layout.addWidget(self.map_group_explorer)
         self.map_ranking_title = QLabel("Top friends")
         self.map_ranking_title.setObjectName("SectionTitle")
         ranking_layout.addWidget(self.map_ranking_title)
-        ranking_note = QLabel("Click to select · Double-click for insights")
-        ranking_note.setObjectName("Muted")
-        ranking_layout.addWidget(ranking_note)
+        self.map_ranking_note = QLabel("Click to select · Double-click for insights")
+        self.map_ranking_note.setObjectName("Muted")
+        self.map_ranking_note.setWordWrap(True)
+        self.map_ranking_note.setFixedHeight(36)
+        self.map_ranking_note.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
+        self.map_ranking_note.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        ranking_layout.addWidget(self.map_ranking_note)
         self.map_top_friends = TopFriendsBarChart()
         self.map_top_friends.friend_selected.connect(self.select_map_friend)
         self.map_top_friends.friend_activated.connect(self.open_map_friend_insights)
+        self.map_top_friends.friend_hovered.connect(self.show_map_ranking_hover)
         ranking_scroll = QScrollArea()
         ranking_scroll.setWidgetResizable(True)
         ranking_scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -1353,6 +1415,11 @@ class MainWindow(QMainWindow):
         ranking_scroll.setWidget(self.map_top_friends)
         ranking_layout.addWidget(ranking_scroll, 1)
         return self.map_ranking_panel
+
+    def show_map_ranking_hover(self, details: str) -> None:
+        self.map_ranking_note.setText(
+            details or "Click to select · Double-click for insights"
+        )
 
     def _build_map_inspector(self) -> QFrame:
         self.map_detail = QFrame()
@@ -1418,6 +1485,7 @@ class MainWindow(QMainWindow):
             self.map_friends_control,
             self.map_connections_control,
             self.map_metric_control,
+            self.map_view_control,
             self.map_reset_button,
         )
         for widget in widgets:
@@ -1426,17 +1494,19 @@ class MainWindow(QMainWindow):
             self.map_toolbar_layout.addWidget(self.map_friends_control, 0, 0)
             self.map_toolbar_layout.addWidget(self.map_connections_control, 0, 1)
             self.map_toolbar_layout.addWidget(self.map_metric_control, 1, 0)
+            self.map_toolbar_layout.addWidget(self.map_view_control, 1, 1)
             self.map_toolbar_layout.addWidget(
                 self.map_reset_button,
                 1,
-                1,
+                2,
                 Qt.AlignmentFlag.AlignRight,
             )
         else:
             self.map_toolbar_layout.addWidget(self.map_friends_control, 0, 0)
             self.map_toolbar_layout.addWidget(self.map_connections_control, 0, 1)
             self.map_toolbar_layout.addWidget(self.map_metric_control, 0, 2)
-            self.map_toolbar_layout.addWidget(self.map_reset_button, 0, 3)
+            self.map_toolbar_layout.addWidget(self.map_view_control, 0, 3)
+            self.map_toolbar_layout.addWidget(self.map_reset_button, 0, 4)
             self.map_toolbar_layout.setColumnStretch(2, 1)
 
     def _connect_shortcuts(self) -> None:
@@ -1496,7 +1566,10 @@ class MainWindow(QMainWindow):
             self.insight_calendar.clear_selection()
             self.insight_day_detail.setText("Select a day for its exact value")
         elif self.pages.currentIndex() == PAGE_FRIEND_MAP:
-            self.friend_map.reset_view()
+            if self._selected_map_group_id:
+                self.show_map_group(0)
+            else:
+                self.friend_map.reset_view()
         elif self.pages.currentIndex() == PAGE_FRIENDS:
             self.clear_friend_filters()
 
@@ -1887,7 +1960,7 @@ class MainWindow(QMainWindow):
         self.set_loading(True, "Building the friend co-presence map…")
         worker = RepositoryWorker(
             generation,
-            lambda: self.repository.load_friend_map(state, max_nodes=40),
+            lambda: self.repository.load_friend_map(state, max_nodes=None),
         )
         worker.signals.result.connect(self.friend_map_loaded)
         worker.signals.error.connect(self.map_error)
@@ -1916,44 +1989,179 @@ class MainWindow(QMainWindow):
             self.friend_map.set_data(FriendMapData(tuple(), tuple()))
             self.map_top_friends.set_nodes(tuple())
             return
-        node_limit = int(self.map_friend_count.value())
+        count_value = self.map_friend_count.value()
+        node_limit = None if count_value == "All" else int(count_value)
         detail = self.map_connection_detail.value()
         metric = self.map_connection_metric.currentText()
+        color_mode = (
+            "Friend groups" if self.map_view_mode.value() == "Groups" else "Activity"
+        )
         self.friend_map.set_data(
             data,
             node_limit=node_limit,
             connection_detail=detail,
             connection_metric=metric,
+            color_mode=color_mode,
         )
+        if (
+            color_mode != "Friend groups"
+            or self._selected_map_group_id > self.friend_map.group_count()
+        ):
+            self._selected_map_group_id = 0
+        self.friend_map.set_selected_group(self._selected_map_group_id)
+        self._populate_map_group_filter(color_mode == "Friend groups")
         node_count, link_count = self.friend_map.visible_counts()
         measured_count = self.friend_map.measured_connection_count()
-        self.map_context.setText(
+        group_context = (
+            f" · {self.friend_map.group_count()} inferred group"
+            f"{'s' if self.friend_map.group_count() != 1 else ''}"
+            if color_mode == "Friend groups"
+            else ""
+        )
+        focus_context = (
+            f" · Group {self._selected_map_group_id} focused"
+            if self._selected_map_group_id
+            else ""
+        )
+        self._map_context_base = (
             f"{node_count} friend{'s' if node_count != 1 else ''} · "
             f"{link_count} of {measured_count} measured connections shown · {metric}"
+            f"{group_context}"
         )
+        self.map_context.setText(f"{self._map_context_base}{focus_context}")
         link_legend = (
             "Stronger links = more consistent co-appearance"
             if metric == "Co-appearance likelihood"
             else "Stronger links = more shared-instance time"
         )
+        color_legend = (
+            self.friend_map.group_legend_html()
+            if color_mode == "Friend groups"
+            else activity_rank_legend_html()
+        )
+        color_meaning = (
+            "Color + position = inferred groups · Click a cluster to explore"
+            if color_mode == "Friend groups"
+            else "Color = activity rank"
+        )
         self.map_legend.setText(
-            f"{activity_rank_legend_html()} &nbsp; · &nbsp; "
-            f"Color = activity rank &nbsp; · &nbsp; Larger node = more time &nbsp; · &nbsp; "
-            f"{link_legend} &nbsp; · &nbsp; "
+            f"{color_legend} &nbsp; · &nbsp; {color_meaning} &nbsp; · &nbsp; "
+            f"Larger node = more time &nbsp; · &nbsp; {link_legend} &nbsp; · &nbsp; "
             '<span style="color:#e6b85c">━</span> Gold = strongest overlap or hovered link'
         )
         visible_nodes = self.friend_map.visible_nodes()
-        self.map_ranking_title.setText(
-            f"Top {len(visible_nodes)} friend"
-            f"{'s' if len(visible_nodes) != 1 else ''}"
-        )
-        self.map_top_friends.set_nodes(visible_nodes)
+        self._update_map_group_panel()
         visible_ids = {node.user_id for node in visible_nodes}
         if self._selected_map_friend_id in visible_ids:
             self.friend_map.set_selected_friend(self._selected_map_friend_id)
             self.show_map_friend(self._selected_map_friend_id)
         elif self._selected_map_friend_id:
             self.clear_map_selection()
+
+    def _populate_map_group_filter(self, groups_visible: bool) -> None:
+        self.map_group_explorer.setVisible(
+            groups_visible and self.friend_map.group_count() > 0
+        )
+        self.map_group_filter.blockSignals(True)
+        self.map_group_filter.clear()
+        visible_count = len(self.friend_map.visible_nodes())
+        self.map_group_filter.addItem(f"All groups · {visible_count} people", 0)
+        selected_index = 0
+        for group_id in range(1, self.friend_map.group_count() + 1):
+            members = self.friend_map.group_members(group_id)
+            swatch = QPixmap(12, 12)
+            swatch.fill(friend_group_color(group_id))
+            self.map_group_filter.addItem(
+                QIcon(swatch),
+                f"Group {group_id} · {len(members)} people",
+                group_id,
+            )
+            if group_id == self._selected_map_group_id:
+                selected_index = self.map_group_filter.count() - 1
+        self.map_group_filter.setCurrentIndex(selected_index)
+        self.map_group_filter.blockSignals(False)
+
+    def select_map_group_from_filter(self, index: int) -> None:
+        group_id = self.map_group_filter.itemData(index)
+        self.show_map_group(group_id if isinstance(group_id, int) else 0)
+
+    def show_map_group(self, group_id: int) -> None:
+        available = range(1, self.friend_map.group_count() + 1)
+        self._selected_map_group_id = group_id if group_id in available else 0
+        self.friend_map.set_selected_group(self._selected_map_group_id)
+        self.clear_map_selection()
+        focus_context = (
+            f" · Group {self._selected_map_group_id} focused"
+            if self._selected_map_group_id
+            else ""
+        )
+        self.map_context.setText(
+            f"{getattr(self, '_map_context_base', '')}{focus_context}"
+        )
+        selected_index = self.map_group_filter.findData(self._selected_map_group_id)
+        if selected_index >= 0 and selected_index != self.map_group_filter.currentIndex():
+            self.map_group_filter.blockSignals(True)
+            self.map_group_filter.setCurrentIndex(selected_index)
+            self.map_group_filter.blockSignals(False)
+        self._update_map_group_panel()
+
+    def _update_map_group_panel(self) -> None:
+        visible_nodes = self.friend_map.visible_nodes()
+        group_id = self._selected_map_group_id
+        members = self.friend_map.group_members(group_id)
+        colors = self.friend_map.node_colors()
+        if group_id <= 0:
+            self.map_ranking_title.setText(
+                f"Top {len(visible_nodes)} friend"
+                f"{'s' if len(visible_nodes) != 1 else ''}"
+            )
+            self.map_group_summary.setText(
+                "Click a colored cluster on the map, or choose one here, "
+                "to isolate its people and internal connections."
+            )
+            self.map_top_friends.set_nodes(visible_nodes, colors=colors)
+            return
+
+        member_ids = {node.user_id for node in members}
+        internal_links = tuple(
+            link
+            for link in (
+                self._friend_map_data.links if self._friend_map_data is not None else ()
+            )
+            if link.source_user_id in member_ids
+            and link.target_user_id in member_ids
+        )
+        total_time = sum(node.milliseconds for node in members)
+        strongest = max(
+            internal_links,
+            key=(
+                (lambda link: link.likelihood)
+                if self.map_connection_metric.currentText()
+                == "Co-appearance likelihood"
+                else (lambda link: link.milliseconds)
+            ),
+            default=None,
+        )
+        strongest_text = "No internal overlap measured"
+        if strongest is not None:
+            names = {node.user_id: node.display_name for node in members}
+            value = (
+                f"{strongest.likelihood:.0%} likelihood"
+                if self.map_connection_metric.currentText()
+                == "Co-appearance likelihood"
+                else format_duration(strongest.milliseconds)
+            )
+            strongest_text = (
+                f"Strongest pair: {names[strongest.source_user_id]} ↔ "
+                f"{names[strongest.target_user_id]} · {value}"
+            )
+        self.map_ranking_title.setText(f"Group {group_id} · {len(members)} people")
+        self.map_group_summary.setText(
+            f"{len(internal_links)} internal connections · "
+            f"{format_duration(total_time)} combined around-you time\n"
+            f"{strongest_text}"
+        )
+        self.map_top_friends.set_nodes(members, colors=colors)
 
     def show_map_friend(self, user_id: str) -> None:
         data = self._friend_map_data
@@ -1962,6 +2170,12 @@ class MainWindow(QMainWindow):
         node = next((item for item in data.nodes if item.user_id == user_id), None)
         if node is None:
             return
+        node_group = self.friend_map.group_for(user_id)
+        if (
+            self._selected_map_group_id
+            and node_group != self._selected_map_group_id
+        ):
+            self.show_map_group(node_group)
         self._selected_map_friend_id = user_id
         self.friend_map.set_selected_friend(user_id)
         rank = self.friend_map.rank_for(user_id)
@@ -2005,7 +2219,12 @@ class MainWindow(QMainWindow):
                 )
         self.map_detail_title.setText(node.display_name)
         self.map_top_friends.set_selected_friend(user_id)
-        self.map_detail_rank.setText(f"Rank #{rank}" if rank else "")
+        group_id = self.friend_map.group_for(user_id)
+        rank_text = f"Rank #{rank}" if rank else ""
+        if self.map_view_mode.value() == "Groups":
+            group_text = f"Group {group_id}" if group_id else "Unclustered"
+            rank_text = f"{rank_text} · {group_text}" if rank_text else group_text
+        self.map_detail_rank.setText(rank_text)
         self.map_time_value.setText(format_duration(node.milliseconds))
         self.map_time_caption.setText("Around you")
         self.map_sessions_value.setText(f"{node.sessions:,}")
@@ -2046,10 +2265,15 @@ class MainWindow(QMainWindow):
     def clear_friend_map(self) -> None:
         self._friend_map_data = None
         self._selected_map_friend_id = None
+        self._selected_map_group_id = 0
         if not hasattr(self, "friend_map"):
             return
         self.friend_map.set_data(FriendMapData(tuple(), tuple()))
         self.map_top_friends.set_nodes(tuple())
+        self.map_group_explorer.hide()
+        self.map_group_filter.blockSignals(True)
+        self.map_group_filter.clear()
+        self.map_group_filter.blockSignals(False)
         self.map_context.setText("Open the map to load this date range")
         self.map_legend.clear()
         self.clear_map_selection()
@@ -2343,6 +2567,25 @@ def run_ui_check(app: QApplication, window: MainWindow) -> int:
             window.set_page(PAGE_FRIEND_MAP)
             return
         if window._friend_map_data is None:
+            return
+        if window.map_view_mode.value() != "Groups":
+            window.map_view_mode.set_value("Groups")
+            return
+        if window.map_friend_count.value() != "All":
+            window.map_friend_count.set_value("All")
+            return
+        if (
+            window.friend_map.group_count()
+            and window.friend_map.selected_group() == 0
+        ):
+            window.show_map_group(1)
+            return
+        ranking_right = window.map_ranking_panel.mapTo(
+            window.map_visuals_host, window.map_ranking_panel.rect().bottomRight()
+        ).x()
+        if ranking_right > window.map_visuals_host.width():
+            LOGGER.error("Friend Map ranking panel extends beyond its viewport")
+            fail()
             return
         LOGGER.info("Packaged UI check completed successfully")
         poll.stop()

@@ -11,7 +11,7 @@ It reads the SQLite database maintained by VRCX locally in strict read-only mode
 ## Highlights
 
 - **Overview dashboard** — period-aware KPIs, social activity trends, and top friends.
-- **Friend Map** — a navigable relationship view of measured same-instance overlap.
+- **Friend Map** — explore measured same-instance overlap, inferred social groups, and every active friend in the selected period.
 - **Shared Time** — view several friends’ time together on zoomable daily, weekly, or monthly timelines.
 - **Friend Insights** — calendar and time-of-week heatmaps, company context, and co-presence rankings.
 - **Friend search** — filter and sort relationships by time, sessions, active days, and first or last seen dates.
@@ -33,13 +33,18 @@ Use the Friends page as the sortable record of your relationships. Search by dis
 
 ### Friend Map
 
-The Friend Map visualizes which current friends share recorded VRChat instances. Node size represents time around you, colors show activity rank, and stronger links mean more shared-instance time. Switch between focused, balanced, and full connection views; choose how many friends to show; pan, zoom, select, and open a friend’s insights directly from the map.
+The Friend Map visualizes which current friends share recorded VRChat instances. Switch between **Activity** colors and inferred **Groups**, show a focused subset or every active friend in the selected period, and tune how many measured connections appear. The map remains navigable at large scales with pan, zoom, friend selection, and direct access to detailed insights.
 
-![Friend Map](docs/screenshots/friend-map.png)
+![Friend Map group explorer with privacy-blurred display names](docs/screenshots/friend-map-groups.png)
+
+#### Explore friend groups
+
+Groups are inferred from repeated, measured overlap in the same known VRChat instance. Color and position make recurring circles easier to recognize without claiming that the people are necessarily friends with one another. Click a colored cluster—or choose it from **Explore group**—to fade unrelated activity and inspect that group on its own. The side panel then lists every member, combined around-you time, internal connection count, and strongest measured pair. People without enough grouping evidence remain visibly separated as unclustered nodes.
 
 #### How to read the Friend Map
 
-- **Colors** indicate activity rank for the selected period: purple is the top 5, cyan is 6–10, blue is 11–20, and green is 21+.
+- **Activity colors** indicate rank for the selected period: purple is the top 5, cyan is 6–10, blue is 11–20, and green is 21+.
+- **Group colors** identify inferred same-instance communities. Select a cluster to reveal more member labels and isolate its internal connections; choose **All groups** or press `Esc` to return.
 - **Node size** represents recorded time around you; friends with stronger measured relationships tend to be positioned closer together.
 - **Connections** require both friends to have been recorded in the same known VRChat instance. A brighter or thicker line means a stronger value for the selected metric.
 - **Gold** highlights the selected friend’s strongest overlap, and also marks the connection under the pointer.
